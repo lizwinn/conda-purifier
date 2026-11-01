@@ -7,7 +7,8 @@
 # jobs of the same names.
 {
   pkgs,
-  # The flake's default package overlay, which adds buildCondaProject.
+  # The flake's default package overlay, which adds the conda-purifier
+  # scope with buildCondaProject.
   overlay,
   # The flake's library, with lib.conda-purifier.readLock.
   lib,
@@ -18,7 +19,7 @@ let
   # Every fixture builds the way a consumer's package does: through the
   # builder that the overlay adds to the package set.
   withOverlay = pkgs.extend overlay;
-  build = withOverlay.buildCondaProject;
+  build = withOverlay.conda-purifier.buildCondaProject;
 
   # An environment.yml with python and numpy from conda-forge, and a pip:
   # section with a pure wheel, a wheel per platform, an sdist, a git
@@ -217,15 +218,22 @@ in
           ).packages.environment.drvPath
     ) "the lock reader did not select each platform's packages and programs";
 
-  # A package written for callPackage takes the builder by name, and
-  # override replaces what the builder takes from the package set.
+  # A package written for callPackage takes the conda-purifier scope by
+  # name. override replaces what the builder takes, and overrideScope
+  # replaces what everything in the scope shares.
   builder-package =
     let
       consumer =
-        { buildCondaProject }: (buildCondaProject { src = ./fixtures/explicit; }).packages.environment;
+        { conda-purifier }:
+        (conda-purifier.buildCondaProject { src = ./fixtures/explicit; }).packages.environment;
       replaced = build.override {
         fetchurl = args: throw "replaced fetchurl was called for ${args.name or args.url}";
       };
+      scoped = withOverlay.conda-purifier.overrideScope (
+        final: prev: {
+          fetchurl = args: throw "scope fetchurl was called for ${args.name or args.url}";
+        }
+      );
     in
     evalCheck "builder-package" (
       (withOverlay.callPackage consumer { }).drvPath == (build { src = ./fixtures/explicit; })
@@ -234,7 +242,13 @@ in
       && !((builtins.tryEval (replaced { src = ./fixtures/explicit; }).packages.environment.drvPath)
         .success
       )
-    ) "the builder is not a package that callPackage and override handle";
+      && !((builtins.tryEval
+        (scoped.buildCondaProject { src = ./fixtures/explicit; }).packages.environment.drvPath
+      ).success
+      )
+      # Nothing but the scope is added to the package set.
+      && !(withOverlay ? buildCondaProject)
+    ) "the builder is not a package of the conda-purifier scope that callPackage and override handle";
 
   # Every fixture's lock has the shape of the purifier contract. A noarch
   # package is one entry for both systems, and a package for one platform
@@ -356,15 +370,37 @@ in
         file:
         builtins.readFile (./fixtures/external + "/${file}")
         == builtins.readFile (./fixtures/explicit + "/${file}");
+      # The source holds a conda-lock.yml that differs from the one the
+      # lockfile was made from, and the build takes the one kept outside.
+      replacedCondaLock = build {
+        src = ./fixtures/external-conda-lock;
+        lockFile = ./fixtures/conda-lock/conda-purifier.lock.json;
+        condaLock = ./fixtures/conda-lock/conda-lock.yml;
+        name = "zstd-env";
+      };
     in
     assert lib.assertMsg (lib.all sameSpec [
       "linux-64.txt"
       "linux-aarch64.txt"
     ]) "conda-purifier check conformance-external: fixtures/external differs from fixtures/explicit";
-    pkgs.runCommand "conformance-external" { nativeBuildInputs = [ external.packages.bzip2 ]; } ''
-      echo hello | bzip2 | bzip2 -d | grep -qx hello
-      touch $out
-    '';
+    assert lib.assertMsg (fails
+      (build {
+        src = ./fixtures/external-conda-lock;
+        lockFile = ./fixtures/conda-lock/conda-purifier.lock.json;
+      }).packages.environment.drvPath
+    ) "conda-purifier check conformance-external: the source's conda-lock.yml was accepted";
+    pkgs.runCommand "conformance-external"
+      {
+        nativeBuildInputs = [
+          external.packages.bzip2
+          replacedCondaLock.packages.zstd
+        ];
+      }
+      ''
+        echo hello | bzip2 | bzip2 -d | grep -qx hello
+        echo hello | zstd | zstd -d | grep -qx hello
+        touch $out
+      '';
 
   # The everyday loop works in the environment `conda-purifier prefetch`
   # builds, activated as `conda activate` does it (its bin/ first on PATH,

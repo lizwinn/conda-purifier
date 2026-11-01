@@ -4,15 +4,16 @@
 # conda-purifier.lock.json in the Nix sandbox, offline.
 #
 # The file is a package for callPackage: the first argument set is what it
-# takes from the package set, and the result is the builder. The
-# conda-purifier overlay (`overlays.default`) adds it to the package set as
-# `buildCondaProject`, so a package written for callPackage takes it like
-# any other dependency:
+# takes from the `conda-purifier` scope, and the result is the builder. The
+# conda-purifier overlay (`overlays.default`) adds that scope to the package
+# set, so a package written for callPackage takes the scope by name:
 #
-#   { buildCondaProject }: (buildCondaProject { src = ./.; }).packages.environment
+#   { conda-purifier }:
+#   (conda-purifier.buildCondaProject { src = ./.; }).packages.environment
 #
-# and `buildCondaProject.override` replaces what it takes from the set. The
-# result has the attributes of the purifier contract:
+# `buildCondaProject.override` replaces what the builder takes, and
+# `conda-purifier.overrideScope` replaces what everything in the scope
+# shares. The result has the attributes of the purifier contract:
 #
 #   packages.environment  the environment: conda's packages, created by
 #                         micromamba from the locked files, with the pip:
@@ -43,6 +44,11 @@
   makeWrapper,
   runCommand,
   mkShell,
+  # What the entries of the lock need besides the fetchers: fetchEntry
+  # takes them by name.
+  unzip,
+  zstd,
+  python3,
   # The fetchers of nixpkgs for the downloads of the lock; `fetchers`
   # replaces any of them.
   fetchurl,
@@ -62,10 +68,12 @@
   # The lockfile. One kept outside `src` lets a packaging flake build a
   # project its author does not change; it replaces any copy in `src`.
   lockFile ? src + "/conda-purifier.lock.json",
-  # The environment file and the conda-lock.yml the lock was made from,
-  # when `src` does not hold them. Each replaces any copy in `src`.
+  # The conda-lock.yml the lock was made from, when the lock is made from
+  # one. A copy kept outside `src` replaces the copy in `src`.
+  condaLock ? null,
+  # The environment file the lock was made from, when `src` does not hold
+  # it. It replaces any copy in `src`.
   environmentYml ? null,
-  condaLockYml ? null,
   # The name of the environment in the store. The default is the `name` of
   # environment.yml, or conda-env.
   name ? null,
@@ -78,17 +86,15 @@
   testCommand ? null,
 }:
 let
-  # An environment file or conda-lock.yml given outside `src` takes the
-  # place of the lock's first input, the file it was made from. Reading
-  # that name here leaves every check of the lockfile to readLock and
-  # checkLock, which run first.
-  given = if environmentYml != null then environmentYml else condaLockYml;
+  # readLock and checkLock make every check of the lockfile and its inputs.
   lock = lib.purifier.checkLock (
     lib.conda-purifier.readLock {
-      inherit src lockFile;
-      inputFiles = lib.optionalAttrs (given != null) {
-        ${builtins.head (builtins.fromJSON (builtins.readFile lockFile)).inputs} = given;
-      };
+      inherit
+        src
+        lockFile
+        condaLock
+        environmentYml
+        ;
     }
   );
 
@@ -115,10 +121,12 @@ let
   # the pip: section's files under pip/ and its checkouts beside them.
   dependencies = lib.purifier.tree (
     {
-      # The only member of a package set that `tree` takes besides the
-      # fetchers.
-      pkgs = { inherit runCommand; };
       inherit
+        runCommand
+        unzip
+        zstd
+        python3
+        writeText
         fetchurl
         fetchgit
         fetchhg

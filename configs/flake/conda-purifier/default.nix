@@ -16,12 +16,14 @@
       inherit (libOverlays) default;
     };
 
-    # The packages are the `default` entry of this flake's package overlay
-    # registry (pkg-overlays/): the package set applies it by default, and
-    # the flake exports it as `pkgOverlays` and as the plain
-    # `overlays.default`.
+    # The `conda-purifier` scope is the `default` entry of the package
+    # overlay registry of this flake (pkg-overlays/): the package set
+    # applies it by default, and the flake exports it as `pkgOverlays` and
+    # as the plain `overlays.default`. The scope holds the builder, which is
+    # a function, so the flake exports the command from the scope by hand
+    # rather than exporting the whole scope as packages.
     nixpkgs = {
-      packages.export.enabled = true;
+      packages.export.enabled = false;
     };
   };
 
@@ -31,7 +33,10 @@
   perSystem =
     { config, pkgs, ... }:
     {
-      packages.default = config.packages.conda-purifier;
+      # The derivations of the scope.
+      packages = lib.filterAttrs (_: lib.isDerivation) pkgs.conda-purifier // {
+        default = config.packages.conda-purifier;
+      };
       devShells.default = pkgs.mkShell {
         packages = [ config.packages.conda-purifier ];
       };

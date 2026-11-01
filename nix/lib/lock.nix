@@ -36,9 +36,12 @@
   # The project directory.
   src,
   lockFile ? src + "/conda-purifier.lock.json",
-  # Input files kept outside `src`, by the name the lock records them
-  # under, for a project whose source does not hold them.
-  inputFiles ? { },
+  # The conda-lock.yml and the environment file the lock was made from,
+  # when the caller keeps them outside `src`. Each replaces the copy in
+  # `src`; a conda-lock.yml takes the place of the input of that name, and
+  # an environment file the place of the first input.
+  condaLock ? null,
+  environmentYml ? null,
 }:
 let
   subdirs = import ./subdir.nix;
@@ -54,6 +57,9 @@ let
     builtins.fromJSON (builtins.readFile lockFile)
   );
 
+  inputFiles =
+    lib.optionalAttrs (condaLock != null) { "conda-lock.yml" = condaLock; }
+    // lib.optionalAttrs (environmentYml != null) { ${builtins.head lock.inputs} = environmentYml; };
   readInput = name: builtins.readFile (inputFiles.${name} or (src + "/${name}"));
 
   # The same text conda-purifier hashes: each input's name and contents.

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 #
 # What `conda-purifier prefetch` and `publish` build for a project: the same
-# lib.conda-purifier.buildCondaProject a sandboxed build uses, from the
+# pkgs.conda-purifier.buildCondaProject a sandboxed build uses, from the
 # project directory as it is on disk. The command evaluates this file with
 # the conda-purifier flake it was built from and the project's absolute
 # path, and keeps the results alive with GC roots under .conda-purifier/.
@@ -13,6 +13,9 @@
   projectDir,
   # The lockfile, when it is kept outside the project; an absolute path.
   lockFile ? "",
+  # The conda-lock.yml, when it is kept outside the project; an absolute
+  # path.
+  condaLock ? "",
 }:
 let
   conda-purifier = builtins.getFlake (toString flake);
@@ -34,6 +37,10 @@ let
       !(base == ".git" || base == ".conda-purifier" || lib.hasPrefix "result" base);
   };
 in
-pkgs.buildCondaProject (
-  { inherit src; } // lib.optionalAttrs (lockFile != "") { lockFile = /. + lockFile; }
+pkgs.conda-purifier.buildCondaProject (
+  {
+    inherit src;
+  }
+  // lib.optionalAttrs (lockFile != "") { lockFile = /. + lockFile; }
+  // lib.optionalAttrs (condaLock != "") { condaLock = /. + condaLock; }
 )

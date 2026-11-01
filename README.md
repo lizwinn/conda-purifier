@@ -9,7 +9,9 @@ for their builders, commands, checks and READMEs.
 ## Quickstart
 
 `conda-purifier lock` solves your `environment.yml` and writes
-`conda-purifier.lock.json` beside it. Commit that file.
+`conda-purifier.lock.json` beside it. We recommend committing it to your
+repository, together with your `conda-lock.yml` if the project has one. The
+builder and the commands look for both files in the project.
 
 ```console
 $ nix run github:nix-purifiers/conda-purifier -- lock
@@ -19,9 +21,10 @@ conda-purifier: solving environment.yml for linux-aarch64
 conda-purifier: wrote conda-purifier.lock.json
 ```
 
-The flake's `overlays.default` adds the builder `buildCondaProject` to a
-package set, where nixpkgs keeps its own builders. Your flake builds the
-environment from the lockfile with it:
+The flake's `overlays.default` adds one attribute to a package set: the
+scope `conda-purifier`, which holds the builder `buildCondaProject` and the
+`conda-purifier` command. Your flake builds the environment from the
+lockfile with the builder:
 
 ```nix
 {
@@ -35,7 +38,7 @@ environment from the lockfile with it:
         system = "x86_64-linux";
         overlays = [ conda-purifier.overlays.default ];
       };
-      project = pkgs.buildCondaProject { src = ./.; };
+      project = pkgs.conda-purifier.buildCondaProject { src = ./.; };
     in
     {
       packages.x86_64-linux = project.packages;
@@ -45,21 +48,26 @@ environment from the lockfile with it:
 }
 ```
 
-A package in an overlay takes the builder by name, like any other builder:
+A package in an overlay takes the scope by name:
 
 ```nix
 # package.nix
-{ buildCondaProject }: (buildCondaProject { src = ./.; }).packages.environment
+{ conda-purifier }:
+(conda-purifier.buildCondaProject { src = ./.; }).packages.environment
 ```
 
-`buildCondaProject.override` replaces the packages that the builder takes
-from the package set, such as `micromamba` or `fetchurl`.
+`buildCondaProject.override` replaces the packages that the builder takes,
+such as `micromamba` or `fetchurl`, and `conda-purifier.overrideScope`
+replaces what everything in the scope shares.
 
 The builder takes `src`, the project directory, and these optional
-arguments: `lockFile`, `fetchers`, `name` (the default is the `name` in
-`environment.yml`), `runLinkScripts`, `testCommand`, and `environmentYml`
-and `condaLockYml` for sources that are not in `src`. It returns these
-attributes:
+arguments. `lockFile` defaults to `conda-purifier.lock.json` in `src`, and
+`condaLock` defaults to `conda-lock.yml` in `src`. `fetchers` replaces
+fetchers for the downloads, `name` defaults to the `name` in
+`environment.yml`, `runLinkScripts` runs the post-link scripts of conda
+packages, `testCommand` replaces the test command, and `environmentYml`
+supplies an environment file that is not in `src`. The builder returns
+these attributes:
 
 | Attribute | What it is |
 |---|---|
@@ -70,8 +78,8 @@ attributes:
 | `fetches` | The entries of the purifier library that the build downloads, for SBOM, license and vulnerability tools. |
 | `shell` | A development shell with the environment active. |
 
-`lib.conda-purifier.readLock { src; lockFile; }` reads the lockfiles into
-the shape every purifier shares: `{ purifier; entries; outputs; problems; }`.
+`lib.conda-purifier.readLock { src; lockFile; condaLock; }` reads the
+lockfiles into the shape every purifier shares: `{ purifier; entries; outputs; problems; }`.
 Each entry carries the Nix `systems` that need it.
 
 ## Development loop
@@ -122,13 +130,23 @@ $ conda-purifier publish -- --publish-url https://test.pypi.org/legacy/ --token 
 A package of the project that setuptools-scm or hatch-vcs versions gets
 the version that pip saw in the lock run, since the sandbox has no `.git`.
 
-### Keeping the lockfile outside the project
+### Keeping the lockfiles outside the project
 
-A packaging flake can build a project whose author does not change it.
-Pass `lockFile` to `buildCondaProject`; it replaces any lockfile in
-`src`. Every command takes `--lockfile <path>`, or reads
-`CONDA_PURIFIER_LOCKFILE`, which a development shell can set to the same
-path. The GC roots then go in `.conda-purifier/` beside the lockfile.
+A flake can build a project that does not carry the lockfiles, such as one
+whose committed `conda-lock.yml` is missing, stale or written by another
+version of conda-lock. The flake keeps `conda-purifier.lock.json` and, if
+the project has one, its own copy of `conda-lock.yml`, and passes them to
+`buildCondaProject` as `lockFile` and `condaLock`. The build uses them in
+place of the copies in `src`.
+
+Every command takes `--lockfile <path>` for `conda-purifier.lock.json`, and
+`--tool-lockfile <path>` for `conda-lock.yml`. The environment variables
+`CONDA_PURIFIER_LOCKFILE` and `CONDA_PURIFIER_TOOL_LOCKFILE` stand in for
+the flags, and a development shell can set them to the paths it passes to
+the builder. With a tool lockfile, `lock` and `update` write
+`conda-lock.yml` there and leave the copy in the project as it is. When the
+file at that path does not exist yet, they start from the copy in the
+project. The GC roots go in `.conda-purifier/` beside `conda-purifier.lock.json`.
 
 ## Working offline
 
@@ -234,8 +252,9 @@ Limits that affect a project:
 [geopandas](https://github.com/geopandas/geopandas) keeps its development
 environment in `environment-dev.yml`: pandas, pyarrow, scipy, matplotlib and
 the GDAL, GEOS and PROJ libraries. To work on it with a conda environment
-from Nix, clone it and lock that file. The lockfile lives in your own
-directory, outside the clone:
+from Nix, clone it and lock that file. geopandas does not carry a
+`conda-purifier.lock.json`, so the lockfile lives in your own directory,
+outside the clone:
 
 ```console
 $ git clone https://github.com/geopandas/geopandas
@@ -270,7 +289,7 @@ To build the same environment in a flake of your own, next to
         system = "x86_64-linux";
         overlays = [ conda-purifier.overlays.default ];
       };
-      project = pkgs.buildCondaProject {
+      project = pkgs.conda-purifier.buildCondaProject {
         src = geopandas;
         lockFile = ./conda-purifier.lock.json;
       };

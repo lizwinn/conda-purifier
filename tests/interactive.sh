@@ -11,6 +11,7 @@
 # Run it from the repository root: tests/interactive.sh
 set -euo pipefail
 
+repo=$PWD
 cli=$(nix build --no-link --print-out-paths '.#conda-purifier')/bin/conda-purifier
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -47,6 +48,28 @@ CONDA_PURIFIER_LOCKFILE=$work/outside/conda-purifier.lock.json "$cli" prefetch
 "$work"/outside/.conda-purifier/env/bin/hello-conda 3 | grep -q 'n+1=4'
 echo "prefetch: a lockfile outside the project works"
 mv ../outside/conda-purifier.lock.json .
+
+# A conda-lock.yml kept outside the project: the lock starts from the copy
+# in the project, the project's copy stays as it is, and the commands read
+# the outside copy.
+cp -r "$repo/tests/fixtures/conda-lock" "$work/cl"
+chmod -R u+w "$work/cl"
+rm "$work/cl/conda-purifier.lock.json"
+"$cli" -C "$work/cl" --tool-lockfile "$work/tool/conda-lock.yml" lock
+cmp "$work/tool/conda-lock.yml" "$work/cl/conda-lock.yml"
+echo "# changed outside" >> "$work/tool/conda-lock.yml"
+if "$cli" -C "$work/cl" --tool-lockfile "$work/tool/conda-lock.yml" prefetch 2> err.txt; then
+  echo "the commands did not read the conda-lock.yml outside the project" >&2
+  exit 1
+fi
+grep -q 'run `conda-purifier lock` again' err.txt
+export CONDA_PURIFIER_TOOL_LOCKFILE=$work/tool/conda-lock.yml
+"$cli" -C "$work/cl" lock
+"$cli" -C "$work/cl" prefetch
+unset CONDA_PURIFIER_TOOL_LOCKFILE
+cmp "$work/cl/conda-lock.yml" "$repo/tests/fixtures/conda-lock/conda-lock.yml"
+echo hello | "$work/cl/.conda-purifier/env/bin/zstd" | "$work/cl/.conda-purifier/env/bin/zstd" -d | grep -qx hello
+echo "lock: a conda-lock.yml outside the project works"
 
 # uv fails to connect after Nix built the wheel it would upload.
 "$cli" publish -- --publish-url http://127.0.0.1:9/ --username x --password y > err.txt 2>&1 || true

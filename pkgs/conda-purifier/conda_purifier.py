@@ -149,12 +149,24 @@ def basename(url):
 # Inputs ------------------------------------------------------------------
 
 
+# The conda-lock.yml that --tool-lockfile names, as an absolute path, or ""
+# for the one in the project; set by main.
+_tool_lockfile = ""
+
+
+def input_path(root, name):
+    """The file of a lock input: the --tool-lockfile stands in for conda-lock.yml."""
+    if _tool_lockfile and name == CONDA_LOCK_FILE:
+        return _tool_lockfile
+    return os.path.join(root, name)
+
+
 def inputs_hash(root, inputs):
     """The hash of the lock's inputs; nix/lib/lock.nix computes the same."""
     text = ""
     for name in inputs:
         # newline="" keeps the bytes builtins.readFile sees.
-        with open(os.path.join(root, name), encoding="utf-8", newline="") as f:
+        with open(input_path(root, name), encoding="utf-8", newline="") as f:
             text += name + "\n" + f.read() + "\n"
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -210,19 +222,19 @@ def find_source(root, files):
             files = previous["inputs"]
             # An environment file's other inputs are the requirement files
             # it includes, which the lock run finds again.
-            if source_kind(os.path.join(root, files[0])) == "environment":
+            if source_kind(input_path(root, files[0])) == "environment":
                 files = files[:1]
         except (json.JSONDecodeError, KeyError, IndexError, OSError):
             files = []
     if files:
-        kinds = {source_kind(os.path.join(root, f)) for f in files}
+        kinds = {source_kind(input_path(root, f)) for f in files}
         if len(kinds) > 1:
             die("--file names files of different kinds; pass one environment.yml, one conda-lock.yml, or explicit spec files.")
         kind = kinds.pop()
         if kind != "explicit" and len(files) > 1:
             die(f"--file takes one {kind} file.")
         return kind, list(files)
-    if os.path.exists(os.path.join(root, CONDA_LOCK_FILE)):
+    if os.path.exists(os.path.join(root, CONDA_LOCK_FILE)) or os.path.exists(input_path(root, CONDA_LOCK_FILE)):
         return "conda-lock", [CONDA_LOCK_FILE]
     for name in ENVIRONMENT_FILES:
         if os.path.exists(os.path.join(root, name)):
@@ -252,11 +264,11 @@ def check_complete(root, lock):
     hash only; the lockfile records the SHA-256 the lock run computed, by
     URL without a token. nix/lib/lock.nix makes the same check.
     """
-    kind = source_kind(os.path.join(root, lock["inputs"][0]))
+    kind = source_kind(input_path(root, lock["inputs"][0]))
     urls = []
     if kind == "explicit":
         for name in lock["inputs"]:
-            with open(os.path.join(root, name), encoding="utf-8") as f:
+            with open(input_path(root, name), encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line or line.startswith(("#", "@")):
@@ -265,7 +277,7 @@ def check_complete(root, lock):
                     if not re.fullmatch(r"(sha256:)?[0-9a-f]{64}", fragment):
                         urls.append(url)
     elif kind == "conda-lock":
-        with open(os.path.join(root, lock["inputs"][0]), encoding="utf-8") as f:
+        with open(input_path(root, lock["inputs"][0]), encoding="utf-8") as f:
             for p in conda_lock_packages(f.read()):
                 if p.get("platform") in lock["platforms"] and not p["hash"].get("sha256"):
                     urls.append(p["url"])
@@ -537,7 +549,7 @@ def conda_lock_packages(text):
 
 
 def lock_conda_lock(root, name, platforms):
-    with open(os.path.join(root, name), encoding="utf-8") as f:
+    with open(input_path(root, name), encoding="utf-8") as f:
         text = f.read()
     data = yaml.safe_load(text)
     version = data.get("version")
@@ -580,9 +592,10 @@ def update_conda_lock(root, name, packages):
     if not conda_lock:
         die(f"{name} is conda-lock's lockfile, and `conda-purifier update` runs conda-lock to update it; "
             "conda-lock is not on PATH.")
-    with open(os.path.join(root, name), encoding="utf-8") as f:
+    lockfile = input_path(root, name)
+    with open(lockfile, encoding="utf-8") as f:
         metadata = (yaml.safe_load(f) or {}).get("metadata", {})
-    command = [conda_lock, "lock", "--lockfile", name]
+    command = [conda_lock, "lock", "--lockfile", lockfile]
     for source in metadata.get("sources", []):
         command += ["--file", source]
     for platform in metadata.get("platforms", []):
@@ -600,7 +613,7 @@ def lock_explicit(root, names, platforms):
     for name in names:
         subdir = None
         entries = []
-        with open(os.path.join(root, name), encoding="utf-8") as f:
+        with open(input_path(root, name), encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 m = re.match(r"#\s*platform:\s*(\S+)", line)
@@ -1071,6 +1084,18 @@ def local_packages(lock):
 # Commands ----------------------------------------------------------------
 
 
+def start_tool_lockfile(root):
+    """Starts the conda-lock.yml kept outside the project from the project's copy.
+
+    With --tool-lockfile, `lock` and `update` write conda-lock.yml at that
+    path and leave the copy in the project as it is.
+    """
+    tree_copy = os.path.join(root, CONDA_LOCK_FILE)
+    if _tool_lockfile and not os.path.exists(_tool_lockfile) and os.path.exists(tree_copy):
+        os.makedirs(os.path.dirname(_tool_lockfile), exist_ok=True)
+        shutil.copyfile(tree_copy, _tool_lockfile)
+
+
 def cmd_lock(args, update=None):
     """Writes the lockfile.
 
@@ -1080,6 +1105,7 @@ def cmd_lock(args, update=None):
     """
     global _download_dir
     root = os.path.abspath(args.directory)
+    start_tool_lockfile(root)
     kind, inputs = find_source(root, args.file)
     if update is not None and kind == "explicit":
         die("explicit spec files pin every package and have no resolver; write them again "
@@ -1219,7 +1245,8 @@ def nix_build(root, attribute, link_name):
     result = subprocess.run(
         ["nix-build", os.path.join(NIX_LIB, "interactive.nix"), "--attr", attribute,
          "--argstr", "flake", FLAKE, "--argstr", "projectDir", root,
-         "--argstr", "lockFile", _lockfile, "--out-link", link],
+         "--argstr", "lockFile", _lockfile, "--argstr", "condaLock", _tool_lockfile,
+         "--out-link", link],
         text=True, capture_output=True,
     )
     if result.returncode != 0:
@@ -1266,12 +1293,16 @@ def cmd_publish(args):
 
 
 def main(argv=None):
-    global _lockfile
+    global _lockfile, _tool_lockfile
     parser = argparse.ArgumentParser(prog="conda-purifier", description=__doc__.split("\n")[0])
     parser.add_argument("-C", "--directory", default=".", help="the project directory")
     parser.add_argument("--lockfile", default=os.environ.get("CONDA_PURIFIER_LOCKFILE", ""),
                         help="the lockfile, when it is kept outside the project "
                         f"(default: $CONDA_PURIFIER_LOCKFILE, or {LOCKFILE} in the project)")
+    parser.add_argument("--tool-lockfile", default=os.environ.get("CONDA_PURIFIER_TOOL_LOCKFILE", ""),
+                        help="the conda-lock.yml, when it is kept outside the project; lock and update "
+                        "write it there and leave the project's copy as it is "
+                        f"(default: $CONDA_PURIFIER_TOOL_LOCKFILE, or {CONDA_LOCK_FILE} in the project)")
     sub = parser.add_subparsers(dest="command_name", required=True)
     lock = sub.add_parser("lock", help=f"write {LOCKFILE}")
     lock.add_argument("--file", "-f", action="append", default=[],
@@ -1293,6 +1324,7 @@ def main(argv=None):
     publish.set_defaults(func=cmd_publish)
     args = parser.parse_args(argv)
     _lockfile = os.path.abspath(args.lockfile) if args.lockfile else ""
+    _tool_lockfile = os.path.abspath(args.tool_lockfile) if args.tool_lockfile else ""
     if getattr(args, "publish_args", None) and args.publish_args[0] == "--":
         args.publish_args = args.publish_args[1:]
     try:

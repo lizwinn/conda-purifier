@@ -2,8 +2,8 @@
 #
 # The `conda-purifier` library namespace. It holds `readLock`, which reads a
 # project's lockfiles into the lock in memory of the purifier contract
-# (nix/lib/lock.nix). The builder needs a package set, so it is the package
-# `buildCondaProject` that the default package overlay adds.
+# (nix/lib/lock.nix). The builder needs a package set, so it is a member of
+# the `conda-purifier` scope that the default package overlay adds.
 { ... }:
 {
 
