@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: MIT
 #
-# Runs every check of the flake: the fixture builds in the Nix sandbox,
-# the lockfile reader checks and the formatting check. The aarch64-linux
-# checks are evaluated, and built by an aarch64 runner.
+# Runs every check of the flake on x86_64-linux and aarch64-linux: the
+# fixture builds in the Nix sandbox, the conformance checks of the purifier
+# contract, the real-world project and the formatting. The three conformance
+# checks the sandbox cannot run are jobs of their own names.
 name: check
 
 on:
@@ -25,11 +26,50 @@ jobs:
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
       - run: nix flake check -L --all-systems --no-build
       - run: nix flake check -L
-      # A relock reproduces the lockfile byte for byte. These fixtures pin
-      # every package; an environment.yml is solved again against the
-      # channels as they are on the day.
-      - name: relock the pinned fixtures
-        run: |
+
+  # A relock reproduces the lockfile byte for byte. These fixtures pin
+  # every package; an environment.yml is solved again against the channels
+  # as they are on the day.
+  conformance-relock:
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - run: |
           nix run .#conda-purifier -- -C tests/fixtures/explicit lock
           nix run .#conda-purifier -- -C tests/fixtures/conda-lock lock
           git diff --exit-code tests/fixtures
+
+  # `update` moves a package the previous lock pinned to an old version,
+  # and the lockfile then reads as a usable lock.
+  conformance-update:
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - run: tests/update.sh
+
+  # A second build of a fixture gives the same output.
+  conformance-rebuild:
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - run: |
+          system=$(nix eval --impure --raw --expr builtins.currentSystem)
+          for fixture in fixture-explicit fixture-app; do
+            nix build -L ".#checks.$system.$fixture"
+            nix build -L --rebuild ".#checks.$system.$fixture"
+          done

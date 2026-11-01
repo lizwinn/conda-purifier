@@ -1,24 +1,23 @@
 # SPDX-License-Identifier: MIT
 #
-# What `conda-purifier env`, `run`, `shell` and `publish` build for a
-# project: the same buildCondaProject a sandboxed build uses, from the
+# What `conda-purifier prefetch` and `publish` build for a project: the same
+# lib.conda-purifier.buildCondaProject a sandboxed build uses, from the
 # project directory as it is on disk. The command evaluates this file with
 # the conda-purifier flake it was built from and the project's absolute
-# path, and keeps the result alive with a GC root under .conda-purifier/.
+# path, and keeps the results alive with GC roots under .conda-purifier/.
 # The flake's lock pins the nixpkgs and the shared purifier library the
 # build uses.
 {
   # The source of the conda-purifier flake, a path in the store.
   flake,
   projectDir,
+  # The lockfile, when it is kept outside the project; an absolute path.
+  lockFile ? "",
 }:
 let
   conda-purifier = builtins.getFlake (toString flake);
-  pkgs = import conda-purifier.inputs.nixpkgs {
-    system = builtins.currentSystem;
-    overlays = [ conda-purifier.overlays.default ];
-  };
-  inherit (pkgs) lib;
+  pkgs = import conda-purifier.inputs.nixpkgs { system = builtins.currentSystem; };
+  inherit (conda-purifier) lib;
   # The project without what is not its source: its version control, the
   # links conda-purifier and nix-build leave in it.
   src = builtins.path {
@@ -32,4 +31,6 @@ let
       !(base == ".git" || base == ".conda-purifier" || lib.hasPrefix "result" base);
   };
 in
-pkgs.buildCondaProject { inherit src; }
+lib.conda-purifier.buildCondaProject (
+  { inherit pkgs src; } // lib.optionalAttrs (lockFile != "") { lockFile = /. + lockFile; }
+)

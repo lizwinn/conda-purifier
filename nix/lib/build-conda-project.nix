@@ -1,57 +1,94 @@
 # SPDX-License-Identifier: MIT
 #
-# Builds a conda project from its conda-purifier.lock.json in the Nix
-# sandbox, offline. The result holds every output the lockfile names:
+# `lib.conda-purifier.buildCondaProject`: builds a conda project from its
+# conda-purifier.lock.json in the Nix sandbox, offline. The result has
+# the attributes of the purifier contract:
 #
-#   env              the environment: conda's packages, created by
-#                    micromamba from the locked files, with the pip:
-#                    section installed into it
-#   programs.<name>  each executable of the environment's bin/, wrapped so
-#                    that it runs with the environment's variables
-#   packages.<name>  the wheel of each of the project's own Python
-#                    packages (the local directories of the pip: section)
-#   shell            a development shell with the environment active
+#   packages.environment  the environment: conda's packages, created by
+#                         micromamba from the locked files, with the pip:
+#                         section installed into it
+#   packages.<program>    each executable of the environment's bin/ on this
+#                         platform, wrapped so that it runs with the
+#                         environment's variables
+#   tests                 the project's test command, run in the
+#                         environment
+#   release               the wheels of the project's own Python packages,
+#                         which `conda-purifier publish` uploads
+#   fetches               the purifier library entries the build fetches
+#   shell                 a development shell with the environment active
 #
 # conda's binaries ask for the dynamic linker at /lib64, which the sandbox
 # and NixOS do not have. The build points every ELF file of the environment
 # at the linker of the package set; the libraries stay conda's own, found
 # through their $ORIGIN run paths.
 {
+  # The composed library, with the shared purifier library under
+  # lib.purifier.
   lib,
-  pkgs,
-  # The shared library of the nix-purifiers (github:nix-purifiers/purifier),
-  # which fetches the download entries and lays them out as a tree.
-  purifier,
-  stdenv,
-  stdenvNoCC,
-  writeText,
-  micromamba,
-  patchelf,
-  makeWrapper,
-  runCommand,
-  mkShell,
 }:
 {
+  pkgs,
   # The project directory, holding conda-purifier.lock.json and the files
   # it was made from.
   src,
+  # Fetchers for the purifier library's fetchEntry and tree, in place of
+  # nixpkgs' own: a fetchurl that brings credentials for a private channel,
+  # or one that goes through a company mirror.
+  fetchers ? { },
+  # The lockfile. One kept outside `src` lets a packaging flake build a
+  # project its author does not change; it replaces any copy in `src`.
   lockFile ? src + "/conda-purifier.lock.json",
+  # The environment file and the conda-lock.yml the lock was made from,
+  # when `src` does not hold them. Each replaces any copy in `src`.
+  environmentYml ? null,
+  condaLockYml ? null,
   # The name of the environment in the store. The default is the `name` of
   # environment.yml, or conda-env.
   name ? null,
   # Runs the conda packages' post-link scripts after the interpreters are
   # patched, as conda does when it installs them.
   runLinkScripts ? true,
-  # The fetcher of locked files. A private channel needs one that brings
-  # credentials, such as fetchurl with a netrc (see the README); the
-  # lockfile holds the channel's URLs without their tokens.
-  fetchurl ? null,
+  # The project's test command, run in a writable copy of `src` with the
+  # environment active. The default runs pytest when the environment has
+  # it, and otherwise starts the environment's python.
+  testCommand ? null,
 }:
 let
-  locked = import ./lock.nix {
-    inherit lib src lockFile;
-    platform = stdenv.hostPlatform;
-  };
+  inherit (pkgs)
+    stdenv
+    stdenvNoCC
+    writeText
+    micromamba
+    patchelf
+    makeWrapper
+    runCommand
+    mkShell
+    ;
+
+  # An environment file or conda-lock.yml given outside `src` takes the
+  # place of the lock's first input, the file it was made from. Reading
+  # that name here leaves every check of the lockfile to readLock and
+  # checkLock, which run first.
+  given = if environmentYml != null then environmentYml else condaLockYml;
+  lock = lib.purifier.checkLock (
+    lib.conda-purifier.readLock {
+      inherit src lockFile;
+      inputFiles = lib.optionalAttrs (given != null) {
+        ${builtins.head (builtins.fromJSON (builtins.readFile lockFile)).inputs} = given;
+      };
+    }
+  );
+
+  inherit (stdenv.hostPlatform) system;
+  subdir = (import ./subdir.nix).ofSystem system;
+  locked =
+    lock.outputs.environment
+    // lock.outputs.environment.platforms.${system} or (throw (
+      if subdir == null then
+        "conda-purifier: conda has no platform for ${system}."
+      else
+        "conda-purifier: ${baseNameOf (toString lockFile)} has no packages for ${subdir}; run `conda-purifier lock --platform ${subdir}` together with the other platforms."
+    ));
 
   envName =
     if name != null then
@@ -61,17 +98,15 @@ let
     else
       "conda-env";
 
-  # Every locked download, at its path: the conda packages under pkgs/, the
-  # pip: section's files under pip/ and its checkouts beside them. The
-  # project's own directories are not downloads.
-  isDownload = e: !(e ? local);
-  dependencies = purifier.tree (
-    {
+  # This system's downloads, at their paths: the conda packages under pkgs/,
+  # the pip: section's files under pip/ and its checkouts beside them.
+  dependencies = lib.purifier.tree (
+    fetchers
+    // {
       inherit pkgs;
       name = "${envName}-dependencies";
-      entries = locked.conda ++ builtins.filter isDownload (locked.pip ++ locked.pipBuild);
+      entries = lib.purifier.entriesFor system lock;
     }
-    // lib.optionalAttrs (fetchurl != null) { inherit fetchurl; }
   );
 
   hex =
@@ -132,7 +167,7 @@ let
     )
   );
 
-  env = stdenvNoCC.mkDerivation (
+  environment = stdenvNoCC.mkDerivation (
     scmVersions
     // {
       name = envName;
@@ -151,6 +186,10 @@ let
       buildPhase = ''
         runHook preBuild
         export HOME=$TMPDIR/home MAMBA_ROOT_PREFIX=$TMPDIR/root CONDA_PKGS_DIRS=$TMPDIR/pkgs
+        # Python caches what the build imports with the time of the build;
+        # compileall writes every cache at the end instead, by content, so
+        # that the environment builds the same each time.
+        export PYTHONDONTWRITEBYTECODE=1
         mkdir -p "$HOME" "$CONDA_PKGS_DIRS"
         for f in ${dependencies}/pkgs/*; do
           cp "$f" "$CONDA_PKGS_DIRS/$(basename "$f")"
@@ -266,11 +305,17 @@ let
         meta.mainProgram = exe;
       }
       ''
-        makeWrapper ${env}/bin/${lib.escapeShellArg exe} "$out/bin/"${lib.escapeShellArg exe} \
-          --set CONDA_PREFIX ${env} --prefix PATH : ${env}/bin ${setVariables}
+        makeWrapper ${environment}/bin/${lib.escapeShellArg exe} "$out/bin/"${lib.escapeShellArg exe} \
+          --set CONDA_PREFIX ${environment} --prefix PATH : ${environment}/bin ${setVariables}
       '';
 
-  package =
+  programs =
+    if lib.elem "environment" locked.programs then
+      throw "conda-purifier: the environment has a program named `environment`, which would hide packages.environment."
+    else
+      lib.genAttrs locked.programs program;
+
+  wheel =
     pname: dir:
     let
       version = (lib.findFirst (e: e.name == pname) { version = "0"; } locked.pip).version;
@@ -289,7 +334,7 @@ let
           export HOME=$TMPDIR/home
           cp -rL --no-preserve=mode ${lib.escapeShellArg "${src}/${dir}"} "$TMPDIR/source"
           mkdir -p "$out"
-          PIP_CONFIG_FILE=/dev/null ${env}/bin/python -m pip wheel --disable-pip-version-check \
+          PIP_CONFIG_FILE=/dev/null ${environment}/bin/python -m pip wheel --disable-pip-version-check \
             --no-index --no-deps --no-cache-dir --find-links ${dependencies}/pip \
             --wheel-dir "$out" "$TMPDIR/source"
           runHook postBuild
@@ -298,18 +343,51 @@ let
         dontFixup = true;
       }
     );
+
+  wheels = lib.mapAttrs wheel locked.packages;
+
+  activate = ''
+    export CONDA_PREFIX=${environment}
+    export PATH=${environment}/bin:$PATH
+  ''
+  + lib.concatStrings (
+    lib.mapAttrsToList (k: v: "export ${k}=${lib.escapeShellArg v}\n") locked.variables
+  );
+
+  defaultTest =
+    if lib.elem "pytest" locked.programs then
+      "python -m pytest"
+    else if lib.elem "python" locked.programs then
+      "python -c pass"
+    else
+      "true";
 in
 {
-  inherit env;
-  programs = lib.genAttrs locked.programs program;
-  packages = lib.mapAttrs package locked.packages;
+  packages = programs // {
+    inherit environment;
+  };
+
+  tests = runCommand "${envName}-tests" { } ''
+    cp -rL --no-preserve=mode ${src} source
+    cd source
+    export HOME=$TMPDIR
+    ${activate}
+    ${if testCommand != null then testCommand else defaultTest}
+    touch $out
+  '';
+
+  # One directory with the wheel of every package of the project. The wheel
+  # files are named by their builds, so the directory links them at build
+  # time rather than reading their names during evaluation.
+  release = runCommand "${envName}-release" { } ''
+    mkdir -p $out
+    ${lib.concatMapStrings (drv: "ln -s ${drv}/*.whl $out/\n") (lib.attrValues wheels)}
+  '';
+
+  fetches = lock.entries;
+
   shell = mkShell {
-    packages = [ env ];
-    shellHook = ''
-      export CONDA_PREFIX=${env}
-    ''
-    + lib.concatStrings (
-      lib.mapAttrsToList (k: v: "export ${k}=${lib.escapeShellArg v}\n") locked.variables
-    );
+    packages = [ environment ];
+    shellHook = activate;
   };
 }

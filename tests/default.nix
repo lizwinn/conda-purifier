@@ -1,65 +1,64 @@
 # SPDX-License-Identifier: MIT
 #
 # The flake's checks. Every one builds in the sandbox; the only network
-# access is the fixed-output fetches of locked files.
+# access is the fixed-output fetches of locked files. The conformance-*
+# checks are those of the purifier contract; conformance-relock and
+# conformance-rebuild need the network or a second build, and run as CI
+# jobs of the same names.
 {
   pkgs,
-  # The flake's default package overlay, which adds buildCondaProject.
-  overlay,
+  # The flake's library, with lib.conda-purifier.buildCondaProject.
+  lib,
+  # The conda-purifier command.
+  cli,
 }:
 let
-  inherit (pkgs) lib;
-
-  # Every fixture builds the way a consumer's package does: through
-  # buildCondaProject of a package set the overlay applies to.
-  withOverlay = pkgs.extend overlay;
-  inherit (withOverlay) buildCondaProject;
+  # Every fixture builds the way a consumer's package does: through the
+  # builder of the flake's library.
+  build = args: lib.conda-purifier.buildCondaProject ({ inherit pkgs; } // args);
 
   # An environment.yml with python and numpy from conda-forge, and a pip:
   # section with a pure wheel, a wheel per platform, an sdist, a git
   # requirement and the project's own package.
-  app = buildCondaProject { src = ./fixtures/app; };
+  app = build { src = ./fixtures/app; };
 
   # Explicit spec files, one per platform, with MD5 hashes only, as
   # `conda list --explicit --md5` writes them.
-  explicit = buildCondaProject {
+  explicit = build {
     src = ./fixtures/explicit;
     name = "bzip2-env";
   };
 
   # A pip: section with a Mercurial and a Subversion requirement.
-  vcs = buildCondaProject { src = ./fixtures/vcs; };
+  vcs = build { src = ./fixtures/vcs; };
 
   # A conda-lock.yml, reused as it is.
-  condaLock = buildCondaProject {
+  condaLock = build {
     src = ./fixtures/conda-lock;
     name = "zstd-env";
   };
 
   # A real project: the development environment of geopandas, pinned to a
-  # commit, with a lockfile that conda-purifier wrote for it. The source is
-  # fetched at evaluation time, since lock.nix reads its environment file.
+  # commit, with a lockfile that conda-purifier wrote for it and that lives
+  # here, outside the project's source. The source is fetched at evaluation
+  # time, since lock.nix reads its environment file.
   geopandasSrc = builtins.fetchTarball {
     url = "https://github.com/geopandas/geopandas/archive/ead9a4fe380b3e5cb189fca03328af4e1db5fa33.tar.gz";
     sha256 = "sha256-9sR1nMgm6iiDQSD4KN8cI9WD38eB/mARv/MHGbOZwIo=";
   };
-  geopandas = buildCondaProject {
+  geopandas = build {
     src = geopandasSrc;
     lockFile = ./real/geopandas/conda-purifier.lock.json;
   };
 
-  host = pkgs.stdenv.hostPlatform;
+  # The lock in memory of a fixture, as the builder reads it.
   readLock =
-    args:
-    import ../nix/lib/lock.nix (
-      {
-        inherit lib;
-        src = ./fixtures/app;
-        lockFile = ./fixtures/app/conda-purifier.lock.json;
-        platform = host;
-      }
-      // args
-    );
+    src: lockFile:
+    lib.conda-purifier.readLock {
+      inherit src;
+      lockFile = lockFile;
+    };
+  appLock = readLock ./fixtures/app ./fixtures/app/conda-purifier.lock.json;
 
   # A lockfile check passes when `assertion` holds; it fails with
   # `message` otherwise.
@@ -71,6 +70,31 @@ let
       throw "conda-purifier check ${name}: ${message}";
 
   fails = value: !(builtins.tryEval (builtins.deepSeq value value)).success;
+
+  # A refused lockfile fails at Nix evaluation, and the command refuses it
+  # before it builds anything, with a message that names the command that
+  # fixes it. `files` are copied into a project; `expected` is the message.
+  refusal =
+    name: refusedAtEvaluation: files: expected:
+    assert lib.assertMsg refusedAtEvaluation
+      "conda-purifier check ${name}: the build accepted the lockfile";
+    pkgs.runCommand name { nativeBuildInputs = [ cli ]; } ''
+      mkdir project
+      ${lib.concatStrings (lib.mapAttrsToList (to: from: "cp ${from} project/${to}\n") files)}
+      if conda-purifier -C project prefetch 2> message.txt; then
+        echo "conda-purifier accepted the lockfile" >&2
+        exit 1
+      fi
+      cat message.txt
+      grep -qF ${lib.escapeShellArg expected} message.txt
+      grep -qF 'run `conda-purifier lock' message.txt
+      touch $out
+    '';
+
+  explicitInputs = {
+    "linux-64.txt" = ./fixtures/explicit/linux-64.txt;
+    "linux-aarch64.txt" = ./fixtures/explicit/linux-aarch64.txt;
+  };
 in
 {
   # The project's command runs with the environment's variables and finds
@@ -78,7 +102,7 @@ in
   app =
     pkgs.runCommand "app-check"
       {
-        nativeBuildInputs = [ app.programs.hello-conda ];
+        nativeBuildInputs = [ app.packages.hello-conda ];
       }
       ''
         line=$(hello-conda 41)
@@ -90,17 +114,20 @@ in
   # numpy comes from the conda package, not from a wheel on PyPI, and the
   # command of the git requirement is a program of the environment.
   app-environment =
+    let
+      environment = app.packages.environment;
+    in
     pkgs.runCommand "app-environment-check"
       {
-        nativeBuildInputs = [ app.programs.sample ];
+        nativeBuildInputs = [ app.packages.sample ];
       }
       ''
-        ls ${app.env}/conda-meta/numpy-2.*.json
-        ${app.env}/bin/python -c 'import importlib.metadata as m; i = m.distribution("numpy").read_text("INSTALLER").strip(); assert i == "conda", i'
+        ls ${environment}/conda-meta/numpy-2.*.json
+        ${environment}/bin/python -c 'import importlib.metadata as m; i = m.distribution("numpy").read_text("INSTALLER").strip(); assert i == "conda", i'
         sample
-        grep -q HELLO_CONDA_GREETING ${app.env}/conda-meta/state
+        grep -q HELLO_CONDA_GREETING ${environment}/conda-meta/state
         # pip says what to do instead of installing into the environment.
-        if ${app.env}/bin/python -m pip install --no-index six > pip.log 2>&1; then
+        if ${environment}/bin/python -m pip install --no-index six > pip.log 2>&1; then
           echo "pip installed into the environment" >&2
           exit 1
         fi
@@ -108,29 +135,40 @@ in
         touch $out
       '';
 
-  # The wheel of the project's own package is built, ready to publish.
-  app-package = pkgs.runCommand "app-package-check" { } ''
-    ls ${app.packages.hello-conda}/hello_conda-0.1.0-py3-none-any.whl
+  # The release holds the wheel of the project's own package, and the
+  # project's tests run against the environment.
+  app-release = pkgs.runCommand "app-release-check" { } ''
+    ls ${app.release}/hello_conda-0.1.0-py3-none-any.whl
+    test -e ${app.tests}
     touch $out
   '';
 
   # The development shell holds the environment and sets its variables.
   app-shell =
-    assert lib.elem app.env app.shell.nativeBuildInputs;
+    assert lib.elem app.packages.environment app.shell.nativeBuildInputs;
     pkgs.runCommand "app-shell-check" { } ''
       ${app.shell.shellHook}
       [ "$HELLO_CONDA_GREETING" = "hello from conda" ]
-      [ "$CONDA_PREFIX" = ${app.env} ]
+      [ "$CONDA_PREFIX" = ${app.packages.environment} ]
       touch $out
     '';
 
-  explicit = pkgs.runCommand "explicit-check" { nativeBuildInputs = [ explicit.programs.bzip2 ]; } ''
+  # `fetches` lists the library entries of every download, and none of the
+  # project's own directories.
+  app-fetches = evalCheck "app-fetches" (
+    lib.all (e: e ? url || e ? git) app.fetches
+    && lib.any (e: e.name == "numpy") app.fetches
+    && lib.any (e: e ? git) app.fetches
+    && !(lib.any (e: e.name == "hello-conda") app.fetches)
+  ) "fetches does not list the downloads of the app fixture";
+
+  explicit = pkgs.runCommand "explicit-check" { nativeBuildInputs = [ explicit.packages.bzip2 ]; } ''
     echo hello | bzip2 | bzip2 -d | grep -qx hello
     touch $out
   '';
 
   conda-lock =
-    pkgs.runCommand "conda-lock-check" { nativeBuildInputs = [ condaLock.programs.zstd ]; }
+    pkgs.runCommand "conda-lock-check" { nativeBuildInputs = [ condaLock.packages.zstd ]; }
       ''
         echo hello | zstd | zstd -d | grep -qx hello
         touch $out
@@ -138,8 +176,8 @@ in
 
   # The Mercurial and Subversion requirements are installed from their
   # checkouts, with their commands.
-  vcs = pkgs.runCommand "vcs-check" { nativeBuildInputs = [ vcs.programs.yoyo ]; } ''
-    ${vcs.env}/bin/python -c 'import yoyo, docutils.core; print(docutils.core.publish_string("*x*", writer="html").count(b"<em>x</em>"))' | grep -qx 1
+  vcs = pkgs.runCommand "vcs-check" { nativeBuildInputs = [ vcs.packages.yoyo ]; } ''
+    ${vcs.packages.environment}/bin/python -c 'import yoyo, docutils.core; print(docutils.core.publish_string("*x*", writer="html").count(b"<em>x</em>"))' | grep -qx 1
     yoyo --help > /dev/null
     touch $out
   '';
@@ -148,8 +186,8 @@ in
   # binutils is named for its platform.
   lock-platforms =
     let
-      x86 = readLock { platform = lib.systems.elaborate "x86_64-linux"; };
-      arm = readLock { platform = lib.systems.elaborate "aarch64-linux"; };
+      x86 = appLock.outputs.environment.platforms.x86_64-linux;
+      arm = appLock.outputs.environment.platforms.aarch64-linux;
     in
     evalCheck "lock-platforms" (
       x86.subdir == "linux-64"
@@ -158,8 +196,52 @@ in
       && lib.elem "aarch64-conda-linux-gnu-ld" arm.programs
       && x86.packages == { hello-conda = "hello"; }
       # The environment takes the name environment.yml gives it.
-      && app.env.name == "hello-conda"
+      && app.packages.environment.name == "hello-conda"
+      # A platform the lock does not cover is refused.
+      &&
+        fails
+          (build {
+            src = ./fixtures/app;
+            pkgs = pkgs // {
+              stdenv = pkgs.stdenv // {
+                hostPlatform = lib.systems.elaborate "powerpc64le-linux";
+              };
+            };
+          }).packages.environment.drvPath
     ) "the lock reader did not select each platform's packages and programs";
+
+  # Every fixture's lock has the shape of the purifier contract. A noarch
+  # package is one entry for both systems, and a package for one platform
+  # is an entry for its system only.
+  lock-shape =
+    let
+      locks = [
+        appLock
+        (readLock ./fixtures/explicit ./fixtures/explicit/conda-purifier.lock.json)
+        (readLock ./fixtures/conda-lock ./fixtures/conda-lock/conda-purifier.lock.json)
+        (readLock ./fixtures/vcs ./fixtures/vcs/conda-purifier.lock.json)
+      ];
+      entry = suffix: lib.findFirst (e: lib.hasSuffix suffix e.path) null appLock.entries;
+    in
+    evalCheck "lock-shape" (
+      lib.all (l: lib.purifier.checkLock l == l) locks
+      && lib.all (l: l.entries != [ ]) locks
+      &&
+        lib.sort lib.lessThan (entry "six-1.17.0-py2.py3-none-any.whl").systems == [
+          "aarch64-linux"
+          "x86_64-linux"
+        ]
+      && (entry "manylinux2014_x86_64.whl").systems == [ "x86_64-linux" ]
+      && app.fetches == appLock.entries
+    ) "a fixture's lock does not have the shape of the purifier contract";
+
+  # The project's own package and the git requirement build without version
+  # control metadata, so setuptools-scm gets the versions the lock run saw.
+  scm-versions = evalCheck "scm-versions" (
+    app.packages.environment.SETUPTOOLS_SCM_PRETEND_VERSION_FOR_HELLO_CONDA == "0.1.0"
+    && app.packages.environment.SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SAMPLEPROJECT == "4.0.0"
+    && !(app.packages.environment ? SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIX)
+  ) "the builds do not pass the locked versions to setuptools-scm";
 
   # geopandas' own tests of its geometry methods and coordinate reference
   # systems pass in the environment, offline in the sandbox, against the
@@ -172,40 +254,107 @@ in
     # setuptools-scm writes this file when geopandas is installed from a
     # checkout; the tests run from the source tree.
     echo '__version__ = "1.1.2.dev0+gead9a4fe"' > geopandas/_version.py
-    ${geopandas.env}/bin/python -m pytest -q -p no:cacheprovider \
+    ${geopandas.packages.environment}/bin/python -m pytest -q -p no:cacheprovider \
       geopandas/tests/test_geom_methods.py geopandas/tests/test_crs.py
     touch $out
   '';
 
-  # The project's own package and the git requirement build without version
-  # control metadata, so setuptools-scm gets the versions the lock run saw.
-  scm-versions = evalCheck "scm-versions" (
-    app.env.SETUPTOOLS_SCM_PRETEND_VERSION_FOR_HELLO_CONDA == "0.1.0"
-    && app.env.SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SAMPLEPROJECT == "4.0.0"
-    && app.packages.hello-conda.SETUPTOOLS_SCM_PRETEND_VERSION_FOR_HELLO_CONDA == "0.1.0"
-    && !(app.env ? SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIX)
-  ) "the builds do not pass the locked versions to setuptools-scm";
+  # The fixtures themselves, which the conformance-rebuild job of CI builds
+  # twice with `nix build --rebuild`.
+  fixture-app = app.packages.environment;
+  fixture-explicit = explicit.packages.environment;
 
-  # A lock with a package hash or a package entry changed by hand is refused
-  # before anything is fetched.
-  lock-edited = evalCheck "lock-edited" (
-    fails
-      (readLock {
-        src = ./fixtures/explicit;
-        lockFile = ./fixtures/tampered-hash/conda-purifier.lock.json;
-      }).conda
-    &&
-      fails
-        (readLock {
+  conformance-stale =
+    refusal "conformance-stale"
+      (fails
+        (build {
+          src = ./fixtures/stale;
+          lockFile = ./fixtures/app/conda-purifier.lock.json;
+        }).packages.environment.drvPath
+      )
+      {
+        "environment.yml" = ./fixtures/stale/environment.yml;
+        "conda-purifier.lock.json" = ./fixtures/app/conda-purifier.lock.json;
+      }
+      "environment.yml changed after conda-purifier.lock.json was written";
+
+  conformance-tampered =
+    refusal "conformance-tampered"
+      (fails
+        (build {
+          src = ./fixtures/explicit;
+          lockFile = ./fixtures/tampered-hash/conda-purifier.lock.json;
+        }).packages.environment.drvPath
+      )
+      (
+        explicitInputs
+        // {
+          "conda-purifier.lock.json" = ./fixtures/tampered-hash/conda-purifier.lock.json;
+        }
+      )
+      "was changed after conda-purifier wrote it";
+
+  conformance-missing =
+    refusal "conformance-missing"
+      (fails
+        (build {
           src = ./fixtures/explicit;
           lockFile = ./fixtures/missing-entry/conda-purifier.lock.json;
-        }).conda
-  ) "the lock reader accepted a lockfile edited by hand";
+        }).packages.environment.drvPath
+      )
+      (
+        explicitInputs
+        // {
+          "conda-purifier.lock.json" = ./fixtures/missing-entry/conda-purifier.lock.json;
+        }
+      )
+      "has no SHA-256 for https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda";
 
-  # A lock whose environment.yml changed afterwards is refused, and so is a
-  # platform the lock does not cover.
-  lock-refusals = evalCheck "lock-refusals" (
-    fails (readLock { src = ./fixtures/stale; }).conda
-    && fails (readLock { platform = lib.systems.elaborate "powerpc64le-linux"; }).conda
-  ) "the lock reader accepted a stale lock or an unlocked platform";
+  conformance-malformed =
+    refusal "conformance-malformed"
+      (fails
+        (build {
+          src = ./fixtures/explicit;
+          lockFile = ./fixtures/malformed/conda-purifier.lock.json;
+        }).packages.environment.drvPath
+      )
+      (explicitInputs // { "conda-purifier.lock.json" = ./fixtures/malformed/conda-purifier.lock.json; })
+      "is not valid JSON";
+
+  # A project whose source holds no lockfile builds from one kept outside
+  # it.
+  conformance-external =
+    let
+      external = build {
+        src = lib.cleanSourceWith {
+          src = ./fixtures/explicit;
+          filter = path: type: baseNameOf path != "conda-purifier.lock.json";
+        };
+        lockFile = ./fixtures/explicit/conda-purifier.lock.json;
+        name = "bzip2-env";
+      };
+    in
+    pkgs.runCommand "conformance-external" { nativeBuildInputs = [ external.packages.bzip2 ]; } ''
+      echo hello | bzip2 | bzip2 -d | grep -qx hello
+      touch $out
+    '';
+
+  # The everyday loop works in the environment `conda-purifier prefetch`
+  # builds, activated as `conda activate` does it (its bin/ first on PATH,
+  # CONDA_PREFIX set), with no network: the sandbox has none. The project's
+  # program, python with its packages and the refusal of pip all work.
+  conformance-offline = pkgs.runCommand "conformance-offline" { } ''
+    export HOME=$TMPDIR
+    export CONDA_PREFIX=${app.packages.environment}
+    export PATH=$CONDA_PREFIX/bin:$PATH
+    hello-conda 41 | tee out.txt
+    grep -q 'n+1=42' out.txt
+    python -c 'import numpy, msgpack, docopt, sample, hello_conda'
+    if python -m pip install --no-index six > pip.log 2>&1; then
+      echo "pip installed into the environment" >&2
+      exit 1
+    fi
+    grep -q 'run `conda-purifier lock`' pip.log
+    touch $out
+  '';
 }

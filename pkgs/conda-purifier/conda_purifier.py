@@ -4,9 +4,11 @@
 `conda-purifier lock` records every file a conda environment needs in
 conda-purifier.lock.json: the conda packages of each platform, and the
 packages of the environment's `pip:` section with what their builds need.
-`buildCondaProject` (nix/lib/build-conda-project.nix) builds the
-environment from that lockfile in the Nix sandbox. `conda-purifier env`,
-`run` and `shell` use the same build outside the sandbox.
+`lib.conda-purifier.buildCondaProject` (nix/lib/build-conda-project.nix)
+builds the environment from that lockfile in the Nix sandbox.
+`conda-purifier prefetch` builds the same environment for day-to-day work
+and keeps it with GC roots, and `conda-purifier publish` uploads the wheels
+Nix built of the project's own packages.
 
 The wrapper that installs this script sets CONDA_PURIFIER_* variables to
 the tools it uses: micromamba, patchelf, the nix-prefetch scripts, the
@@ -33,7 +35,7 @@ import zipfile
 import yaml
 
 LOCKFILE = "conda-purifier.lock.json"
-FORMAT = 1
+FORMAT = 2
 ENVIRONMENT_FILES = ("environment.yml", "environment.yaml")
 CONDA_LOCK_FILE = "conda-lock.yml"
 DEFAULT_PLATFORMS = ("linux-64", "linux-aarch64")
@@ -168,9 +170,19 @@ def lock_hash(lock):
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+# The lockfile --lockfile names, as an absolute path, or "" for the one in
+# the project; set by main.
+_lockfile = ""
+
+
+def lock_file(root):
+    """The project's lockfile: the one --lockfile names, or the one in root."""
+    return _lockfile or os.path.join(root, LOCKFILE)
+
+
 def read_lock(root):
     """Reads a project's lockfile, refusing a malformed or edited one."""
-    path = os.path.join(root, LOCKFILE)
+    path = lock_file(root)
     try:
         with open(path, encoding="utf-8") as f:
             lock = json.load(f)
@@ -178,6 +190,9 @@ def read_lock(root):
         die(f"{path} is not valid JSON ({e}); run `conda-purifier lock` to write it again.")
     if lock.get("lockHash") != lock_hash(lock):
         die(f"{path} was changed after conda-purifier wrote it; run `conda-purifier lock` to write it again.")
+    if lock.get("version") != FORMAT:
+        die(f"{path} is format {lock.get('version')}; this conda-purifier reads format {FORMAT}. "
+            "Run `conda-purifier lock` to write it again.")
     return lock
 
 
@@ -188,15 +203,16 @@ def find_source(root, files):
     files it was made from, so `conda-purifier lock` keeps working on an
     environment-dev.yml or on explicit spec files.
     """
-    if not files and os.path.exists(os.path.join(root, LOCKFILE)):
+    if not files and os.path.exists(lock_file(root)):
         try:
-            with open(os.path.join(root, LOCKFILE), encoding="utf-8") as f:
+            with open(lock_file(root), encoding="utf-8") as f:
                 previous = json.load(f)
-            if previous.get("source") == "environment":
-                files = previous["inputs"][:1]
-            elif previous.get("source") in ("conda-lock", "explicit"):
-                files = previous["inputs"]
-        except (json.JSONDecodeError, KeyError, OSError):
+            files = previous["inputs"]
+            # An environment file's other inputs are the requirement files
+            # it includes, which the lock run finds again.
+            if source_kind(os.path.join(root, files[0])) == "environment":
+                files = files[:1]
+        except (json.JSONDecodeError, KeyError, IndexError, OSError):
             files = []
     if files:
         kinds = {source_kind(os.path.join(root, f)) for f in files}
@@ -217,7 +233,7 @@ def find_source(root, files):
 def previous_platforms(root):
     """The platforms an existing lockfile covers, which a relock keeps."""
     try:
-        with open(os.path.join(root, LOCKFILE), encoding="utf-8") as f:
+        with open(lock_file(root), encoding="utf-8") as f:
             return sorted(json.load(f).get("platforms", {}))
     except (json.JSONDecodeError, OSError, AttributeError):
         return []
@@ -226,7 +242,37 @@ def previous_platforms(root):
 def check_fresh(root, lock):
     """Refuses a lock whose inputs changed, naming them as the project does."""
     if inputs_hash(root, lock["inputs"]) != lock.get("inputsHash"):
-        die(f"{', '.join(lock['inputs'])} changed after {LOCKFILE} was written; run `conda-purifier lock` again.")
+        die(f"{', '.join(lock['inputs'])} changed after {os.path.basename(lock_file(root))} was written; run `conda-purifier lock` again.")
+
+
+def check_complete(root, lock):
+    """Refuses a lock that lacks the SHA-256 of a file its inputs list.
+
+    A conda-lock.yml or an explicit spec file may list a file with an MD5
+    hash only; the lockfile records the SHA-256 the lock run computed, by
+    URL without a token. nix/lib/lock.nix makes the same check.
+    """
+    kind = source_kind(os.path.join(root, lock["inputs"][0]))
+    urls = []
+    if kind == "explicit":
+        for name in lock["inputs"]:
+            with open(os.path.join(root, name), encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith(("#", "@")):
+                        continue
+                    url, _, fragment = line.partition("#")
+                    if not re.fullmatch(r"(sha256:)?[0-9a-f]{64}", fragment):
+                        urls.append(url)
+    elif kind == "conda-lock":
+        with open(os.path.join(root, lock["inputs"][0]), encoding="utf-8") as f:
+            for p in conda_lock_packages(f.read()):
+                if p.get("platform") in lock["platforms"] and not p["hash"].get("sha256"):
+                    urls.append(p["url"])
+    for url in urls:
+        if without_token(url) not in lock.get("hashes", {}):
+            die(f"{os.path.basename(lock_file(root))} has no SHA-256 for {without_token(url)}; "
+                "run `conda-purifier lock` to write it again.")
 
 
 def source_kind(path):
@@ -295,17 +341,38 @@ class Micromamba:
         )
         os.makedirs(self.env["HOME"], exist_ok=True)
 
-    def solve(self, environment, subdir):
+    def solve(self, environment, subdir, pins=()):
+        """Solves an environment file for a platform.
+
+        `pins` are exact specs of packages the previous lock resolved, which
+        the solve keeps. They go into a copy of the environment file, without
+        its pip: section, which a solve does not read.
+        """
         env = dict(self.env)
         if subdir.startswith("linux-") and GLIBC:
             # The environment runs on the glibc of the Nix package set.
             env.setdefault("CONDA_OVERRIDE_GLIBC", GLIBC)
-        out = run(
-            [MICROMAMBA, "create", "--yes", "--dry-run", "--json", "--no-rc",
-             "--platform", subdir, "--prefix", os.path.join(self.work, "solve", subdir),
-             "--file", environment],
-            env=env,
-        )
+        if pins:
+            with open(environment, encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            data["dependencies"] = [
+                d for d in data.get("dependencies") or [] if isinstance(d, str)
+            ] + list(pins)
+            environment = os.path.join(self.work, f"pinned-{subdir}.yml")
+            with open(environment, "w", encoding="utf-8") as f:
+                yaml.safe_dump(data, f)
+        try:
+            out = run(
+                [MICROMAMBA, "create", "--yes", "--dry-run", "--json", "--no-rc",
+                 "--platform", subdir, "--prefix", os.path.join(self.work, "solve", subdir),
+                 "--file", environment],
+                env=env,
+            )
+        except Failure as e:
+            if not pins:
+                raise
+            die(f"{e}\nThe environment file conflicts with the versions the lock keeps; "
+                "run `conda-purifier update` with the packages to move.")
         actions = json.loads(out).get("actions", {})
         packages = actions.get("LINK") or actions.get("FETCH") or []
         if not packages:
@@ -401,10 +468,17 @@ def patch_interpreters(prefix):
 # by cmd_lock for the length of the run.
 _download_dir: str = ""
 
+# The SHA-256 the lock run computed for files that a conda-lock.yml or an
+# explicit spec file lists without one, by URL without a token. The
+# lockfile records these, since Nix fetches a file only by its SHA-256.
+_computed_hashes: dict[str, str] = {}
+
 
 def download_hash(url):
     target = os.path.join(_download_dir, hashlib.sha256(url.encode()).hexdigest())
-    return download(url, target)
+    sha = download(url, target)
+    _computed_hashes[without_token(url)] = sri(sha)
+    return sha
 
 
 def verify_md5(url, md5):
@@ -415,15 +489,67 @@ def verify_md5(url, md5):
         actual = hashlib.md5(f.read()).hexdigest()
     if actual != md5:
         die(f"{url} has MD5 {actual}, and the spec says {md5}.")
+    _computed_hashes[without_token(url)] = sri(sha)
     return sha
+
+
+def unquote(value):
+    """A YAML scalar as conda-lock writes it: plain, or in quotes."""
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1].replace("''", "'")
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        return value[1:-1]
+    return value
+
+
+def conda_lock_packages(text):
+    """The packages of a conda-lock.yml, read line by line.
+
+    Nix has no YAML reader, so nix/lib/lock.nix reads conda-lock.yml with
+    these same rules, which fit the layout conda-lock writes. The lock run
+    compares the result with a YAML parser's and refuses a file whose
+    layout differs.
+    """
+    items, inside, parent = [], False, None
+    for line in text.split("\n"):
+        if not inside:
+            inside = re.fullmatch(r"package:\s*", line) is not None
+            continue
+        if line.startswith("- "):
+            items.append({"hash": {}})
+            parent = None
+        elif line and not line.startswith(" "):
+            break
+        if not items:
+            continue
+        m = re.fullmatch(r"(?:- |  )([A-Za-z_]+):(?: (.*))?", line)
+        if m:
+            if m.group(2):
+                items[-1][m.group(1)] = unquote(m.group(2))
+                parent = None
+            else:
+                parent = m.group(1)
+            continue
+        m = re.fullmatch(r"    ([A-Za-z0-9_]+): (.*)", line)
+        if m and parent == "hash":
+            items[-1]["hash"][m.group(1)] = unquote(m.group(2))
+    return items
 
 
 def lock_conda_lock(root, name, platforms):
     with open(os.path.join(root, name), encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+        text = f.read()
+    data = yaml.safe_load(text)
     version = data.get("version")
     if version != 1:
         die(f"{name} is conda-lock format {version}; conda-purifier reads format 1.")
+
+    def fields(p):
+        return [str(p.get(k)) for k in ("platform", "manager", "url")] + [str(p.get("hash", {}).get("sha256"))]
+
+    if [fields(p) for p in data["package"]] != [fields(p) for p in conda_lock_packages(text)]:
+        die(f"{name} is not laid out as conda-lock writes it, and Nix reads it line by line; "
+            "run `conda-lock` to write it again.")
     result = {}
     for p in data["package"]:
         subdir = p["platform"]
@@ -442,6 +568,31 @@ def lock_conda_lock(root, name, platforms):
         else:
             die(f"{name}: package {p['name']} has manager {p['manager']}.")
     return result
+
+
+def update_conda_lock(root, name, packages):
+    """Re-resolves a conda-lock.yml with conda-lock's own update.
+
+    conda-lock reads the sources and platforms the lockfile records. With
+    package names, it moves only those packages.
+    """
+    conda_lock = shutil.which("conda-lock")
+    if not conda_lock:
+        die(f"{name} is conda-lock's lockfile, and `conda-purifier update` runs conda-lock to update it; "
+            "conda-lock is not on PATH.")
+    with open(os.path.join(root, name), encoding="utf-8") as f:
+        metadata = (yaml.safe_load(f) or {}).get("metadata", {})
+    command = [conda_lock, "lock", "--lockfile", name]
+    for source in metadata.get("sources", []):
+        command += ["--file", source]
+    for platform in metadata.get("platforms", []):
+        command += ["--platform", platform]
+    for package in packages:
+        command += ["--update", package]
+    log(f"updating {name} with conda-lock")
+    result = subprocess.run(command, cwd=root, text=True, capture_output=True, check=False)
+    if result.returncode != 0:
+        die(f"conda-lock failed:\n{result.stderr[-3000:]}")
 
 
 def lock_explicit(root, names, platforms):
@@ -571,12 +722,20 @@ def read_pyproject_from_archive(path):
 class Pip:
     """pip of the lock run's host environment."""
 
-    def __init__(self, python, cwd, index_options, work):
+    def __init__(self, python, cwd, index_options, work, constraints=()):
         self.python = python
         self.cwd = cwd
         self.index_options = index_options
         self.work = work
         self.count = 0
+        # The versions the previous lock resolved, which every resolution
+        # keeps (pip's constraints file).
+        self.constraint_options = []
+        if constraints:
+            path = os.path.join(work, "constraints.txt")
+            with open(path, "w") as f:
+                f.write("\n".join(constraints) + "\n")
+            self.constraint_options = ["-c", path]
 
     def report(self, args, isolated=True):
         """What pip would install, as its installation report.
@@ -589,7 +748,8 @@ class Pip:
         report = os.path.join(self.work, f"report-{self.count}.json")
         isolation = ["--ignore-installed"] if isolated else []
         run([self.python, "-m", "pip", "install", "--disable-pip-version-check", "--dry-run",
-             *isolation, "--quiet", "--report", report, *self.index_options, *args],
+             *isolation, "--quiet", "--report", report, *self.index_options,
+             *self.constraint_options, *args],
             cwd=self.cwd, env=vcs_env(self.work))
         with open(report) as f:
             return json.load(f)["install"]
@@ -625,14 +785,20 @@ def read_text(path):
         return None
 
 
-def lock_pip(root, env_dir, requirements, host_python, host, platforms, work):
+def lock_pip(root, env_dir, requirements, host_python, host, platforms, work, constraints):
     """Locks an environment.yml `pip:` section for every platform."""
     lines = [str(r).strip() for r in requirements]
     reqs = os.path.join(work, "requirements.txt")
     with open(reqs, "w") as f:
         f.write("\n".join(lines) + "\n")
-    pip = Pip(host_python, env_dir, index_options_of(lines), work)
-    items = pip.report(["-r", reqs], isolated=False)
+    pip = Pip(host_python, env_dir, index_options_of(lines), work, constraints)
+    try:
+        items = pip.report(["-r", reqs], isolated=False)
+    except Failure as e:
+        if not constraints:
+            raise
+        die(f"{e}\nThe pip: section conflicts with the versions the lock keeps; "
+            "run `conda-purifier update` with the packages to move.")
     pyver = pip.python_version()
 
     shared = []  # entries every platform shares
@@ -816,13 +982,110 @@ def verify_pip(root, env_dir, python, entries, build_entries, work):
     return sorted(os.listdir(scripts)) if os.path.isdir(scripts) else []
 
 
+# The lockfile ------------------------------------------------------------
+
+
+def recorded_entry(e):
+    """The fields of a pip entry that nix/lib/lock.nix cannot derive.
+
+    lock.nix derives the path of a download from its URL or its name, and
+    sets the checkout options pip itself uses.
+    """
+    if "local" in e:
+        return {k: e[k] for k in ("name", "version", "local")}
+    if "url" in e:
+        return {k: e[k] for k in ("name", "version", "url", "hash")}
+    vcs = next(k for k in ("git", "hg", "svn", "bzr") if k in e)
+    return {"name": e["name"], "version": e["version"], "hash": e["hash"],
+            vcs: {"url": e[vcs]["url"], "rev": e[vcs]["rev"]}}
+
+
+def recorded_platforms(kind, found):
+    """What the lockfile records for each platform.
+
+    For an environment.yml, that is micromamba's solve and pip's resolution,
+    which nothing else records; lock.nix derives each conda package's name,
+    version and path from its file name. For a conda-lock.yml or explicit
+    spec files, lock.nix reads the packages from those files, and the
+    lockfile records only the programs, and under `hashes` the SHA-256 of
+    files listed without one.
+    """
+    recorded = {}
+    for subdir, locked in found.items():
+        recorded[subdir] = {"programs": locked["programs"]}
+        if kind == "environment":
+            recorded[subdir].update(
+                conda=[{"url": e["url"], "hash": e["hash"]} for e in locked["conda"]],
+                pip=[recorded_entry(e) for e in locked["pip"]],
+                pipBuild=[recorded_entry(e) for e in locked["pipBuild"]],
+            )
+    return recorded
+
+
+def previous_lock(root):
+    """The platforms of the existing lockfile, or {} when there is none.
+
+    `lock` keeps their versions; `update` re-resolves.
+    """
+    try:
+        with open(lock_file(root), encoding="utf-8") as f:
+            lock = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if lock.get("version") != FORMAT or lock.get("lockHash") != lock_hash(lock):
+        return {}
+    return {
+        subdir: {
+            "conda": [e["url"] for e in locked.get("conda", [])],
+            "pip": locked.get("pip", []),
+            "pipBuild": locked.get("pipBuild", []),
+        }
+        for subdir, locked in lock.get("platforms", {}).items()
+    }
+
+
+def conda_pin(url):
+    """The exact spec of a conda package file: <name>==<version>=<build>."""
+    stem = re.sub(r"\.(conda|tar\.bz2)$", "", basename(url))
+    name, version, build = stem.rsplit("-", 2)
+    return f"{name}=={version}={build}"
+
+
+def requirement_name(requirement):
+    """The package a conda spec or a pip requirement names, in lower case."""
+    spec = str(requirement).split("::")[-1].strip()
+    m = re.match(r"[A-Za-z0-9_.\-]+", spec)
+    return m.group(0).lower() if m and not spec.startswith("-") else ""
+
+
+def local_packages(lock):
+    """The project's own Python packages, by name, as their directories."""
+    return {
+        e["name"]: e["local"]
+        for locked in lock["platforms"].values()
+        for e in locked.get("pip", [])
+        if "local" in e
+    }
+
+
 # Commands ----------------------------------------------------------------
 
 
-def cmd_lock(args):
+def cmd_lock(args, update=None):
+    """Writes the lockfile.
+
+    `update` is None for `conda-purifier lock`, which keeps the versions of
+    the previous lock; [] for `conda-purifier update`, which re-resolves
+    every package; and the package names `update` was given otherwise.
+    """
     global _download_dir
     root = os.path.abspath(args.directory)
     kind, inputs = find_source(root, args.file)
+    if update is not None and kind == "explicit":
+        die("explicit spec files pin every package and have no resolver; write them again "
+            "with `conda list --explicit --md5`, then run `conda-purifier lock`.")
+    if update is not None and kind == "conda-lock":
+        update_conda_lock(root, inputs[0], update)
     platforms = list(args.platform or previous_platforms(root) or DEFAULT_PLATFORMS)
     host = host_subdir()
     variables = {}
@@ -852,10 +1115,34 @@ def cmd_lock(args):
                         os.path.relpath(os.path.join(os.path.dirname(path), str(r).split(None, 1)[1]), root)
                         for r in section if str(r).startswith("-r ")
                     ]
+            # The previous lock's versions stay, except for the packages the
+            # environment file names (its own specs decide them) and the
+            # ones `update` moves.
+            previous = previous_lock(root) if update != [] else {}
+            free = {requirement_name(d) for d in environment.get("dependencies") or [] if isinstance(d, str)}
+            free |= {n.lower() for n in update or []}
             found = {}
             for subdir in platforms:
-                log(f"solving {inputs[0]} for {subdir}")
-                found[subdir] = {"conda": mamba.solve(path, subdir), "pip": [], "pipBuild": []}
+                pins = [
+                    pin for url in previous.get(subdir, {}).get("conda", [])
+                    if (pin := conda_pin(url)).split("==")[0].lower() not in free
+                ]
+                log(f"solving {inputs[0]} for {subdir}" + (f", keeping {len(pins)} locked packages" if pins else ""))
+                solved = mamba.solve(path, subdir, pins)
+                # The same packages as before stay in the same install order,
+                # which the pins would otherwise change: that order is valid,
+                # and an unchanged project then relocks to the same bytes.
+                prior = previous.get(subdir, {}).get("conda", [])
+                by_url = {e["url"]: e for e in solved}
+                if prior and sorted(by_url) == sorted(prior):
+                    solved = [by_url[url] for url in prior]
+                found[subdir] = {"conda": solved, "pip": [], "pipBuild": []}
+            pip_free = free | {requirement_name(r) for r in pip_requirements}
+            constraints = sorted({
+                f"{e['name']}=={e['version']}"
+                for e in previous.get(host, {}).get("pip", []) + previous.get(host, {}).get("pipBuild", [])
+                if "url" in e and e["name"].lower() not in pip_free
+            })
         if not found:
             die("no packages were locked; check --platform.")
         pip_programs = []
@@ -870,7 +1157,7 @@ def cmd_lock(args):
                 die("the environment has a pip: section but no python.")
             env_dir = os.path.dirname(path)
             log("resolving the pip: section")
-            pip_found = lock_pip(root, env_dir, pip_requirements, python, host, list(found), work)
+            pip_found = lock_pip(root, env_dir, pip_requirements, python, host, list(found), work, constraints)
             for subdir in found:
                 found[subdir].update(pip_found[subdir])
             log("installing the pip: section offline from the locked files")
@@ -879,35 +1166,39 @@ def cmd_lock(args):
             log(f"reading the programs of the {subdir} packages")
             programs = set(mamba.programs(subdir, locked["conda"])) | set(pip_programs)
             locked["programs"] = sorted(programs)
-        local_packages = {}
-        for locked in found.values():
-            for e in locked["pip"]:
-                if "local" in e:
-                    local_packages[e["name"]] = e["local"]
-        outputs = {"packages": local_packages}
-        if env_name:
-            outputs["name"] = str(env_name)
     lock = {
         "version": FORMAT,
-        "source": kind,
         "inputs": inputs,
         "inputsHash": inputs_hash(root, inputs),
-        "variables": variables,
-        "outputs": outputs,
-        "platforms": found,
+        "platforms": recorded_platforms(kind, found),
     }
+    if variables:
+        lock["variables"] = variables
+    if env_name:
+        lock["outputs"] = {"name": str(env_name)}
+    if kind != "environment" and _computed_hashes:
+        lock["hashes"] = dict(sorted(_computed_hashes.items()))
     lock["lockHash"] = lock_hash(lock)
-    with open(os.path.join(root, LOCKFILE), "w") as f:
+    with open(lock_file(root), "w") as f:
         json.dump(lock, f, indent=2, sort_keys=True)
         f.write("\n")
     counts = ", ".join(
         f"{s}: {len(p['conda'])} conda, {len(p['pip'])} pip" for s, p in sorted(found.items())
     )
-    log(f"wrote {LOCKFILE} ({counts})")
+    log(f"wrote {lock_file(root)} ({counts})")
 
 
 def project_root(start):
+    """The project directory: the nearest one upwards with a lockfile.
+
+    With --lockfile or CONDA_PURIFIER_LOCKFILE, the lockfile is elsewhere,
+    and the project is the directory -C names.
+    """
     directory = os.path.abspath(start)
+    if _lockfile:
+        if not os.path.exists(_lockfile):
+            die(f"{_lockfile} does not exist; run `conda-purifier lock --lockfile {_lockfile}` first.")
+        return directory
     while not os.path.exists(os.path.join(directory, LOCKFILE)):
         parent = os.path.dirname(directory)
         if parent == directory:
@@ -916,13 +1207,19 @@ def project_root(start):
     return directory
 
 
+def gc_roots(root):
+    """The directory of the GC roots: .conda-purifier/ beside the lockfile."""
+    return os.path.join(os.path.dirname(lock_file(root)), ".conda-purifier")
+
+
 def nix_build(root, attribute, link_name):
-    """Builds an output of the project through Nix, rooted under .conda-purifier/."""
-    link = os.path.join(root, ".conda-purifier", link_name)
+    """Builds an output of the project through Nix, with a GC root."""
+    link = os.path.join(gc_roots(root), link_name)
     os.makedirs(os.path.dirname(link), exist_ok=True)
     result = subprocess.run(
         ["nix-build", os.path.join(NIX_LIB, "interactive.nix"), "--attr", attribute,
-         "--argstr", "flake", FLAKE, "--argstr", "projectDir", root, "--out-link", link],
+         "--argstr", "flake", FLAKE, "--argstr", "projectDir", root,
+         "--argstr", "lockFile", _lockfile, "--out-link", link],
         text=True, capture_output=True,
     )
     if result.returncode != 0:
@@ -930,39 +1227,24 @@ def nix_build(root, attribute, link_name):
     return os.path.realpath(link)
 
 
-def build_env(root):
+def cmd_prefetch(args):
+    """Realizes what day-to-day development needs, with GC roots.
+
+    .conda-purifier/env is the environment, which conda activates by path
+    and editors take as their interpreter. .conda-purifier/downloads keeps
+    every locked download, so that a rebuild after a change to the
+    project's own packages works with the network cut off.
+    """
+    root = project_root(args.directory)
     # The lockfile's own errors read better here than from Nix.
-    check_fresh(root, read_lock(root))
-    return nix_build(root, "env", "env")
-
-
-def activated(root, prefix):
-    variables = read_lock(root).get("variables", {})
-    env = dict(os.environ)
-    env.update(variables)
-    env["CONDA_PREFIX"] = prefix
-    env["PATH"] = os.path.join(prefix, "bin") + os.pathsep + env.get("PATH", "")
-    return env
-
-
-def cmd_env(args):
-    print(build_env(project_root(args.directory)))
-
-
-def cmd_run(args):
-    command = args.command[1:] if args.command[:1] == ["--"] else args.command
-    if not command:
-        die("run takes a command: conda-purifier run -- python ...")
-    root = project_root(args.directory)
-    prefix = build_env(root)
-    os.execvpe(command[0], command, activated(root, prefix))
-
-
-def cmd_shell(args):
-    root = project_root(args.directory)
-    prefix = build_env(root)
-    shell = os.environ.get("SHELL", "/bin/sh")
-    os.execvpe(shell, [shell], activated(root, prefix))
+    lock = read_lock(root)
+    check_fresh(root, lock)
+    check_complete(root, lock)
+    prefix = nix_build(root, "packages.environment", "env")
+    nix_build(root, "packages.environment.dependencies", "downloads")
+    env_link = os.path.join(gc_roots(root), "env")
+    log(f"the environment is {prefix}")
+    log(f"activate it with `conda activate {env_link}`; editors take {env_link}/bin/python")
 
 
 def cmd_publish(args):
@@ -972,23 +1254,24 @@ def cmd_publish(args):
     current build backends such as hatchling write.
     """
     root = project_root(args.directory)
-    packages = read_lock(root).get("outputs", {}).get("packages", {})
-    names = args.package or sorted(packages)
-    if not names:
-        die(f"{LOCKFILE} names no packages of the project; the pip: section has no local directories.")
-    wheels = []
-    for name in names:
-        if name not in packages:
-            die(f"{name} is not one of the project's packages: {', '.join(sorted(packages))}.")
-        built = nix_build(root, f'packages."{name}"', f"package-{name}")
-        wheels += [os.path.join(built, w) for w in sorted(os.listdir(built))]
+    lock = read_lock(root)
+    check_fresh(root, lock)
+    check_complete(root, lock)
+    if not local_packages(lock):
+        die(f"{lock_file(root)} names no packages of the project; the pip: section has no local directories.")
+    built = nix_build(root, "release", "release")
+    wheels = [os.path.join(built, w) for w in sorted(os.listdir(built))]
     uv = os.environ.get("CONDA_PURIFIER_UV", "uv")
     os.execvp(uv, [uv, "publish", *args.publish_args, *wheels])
 
 
 def main(argv=None):
+    global _lockfile
     parser = argparse.ArgumentParser(prog="conda-purifier", description=__doc__.split("\n")[0])
     parser.add_argument("-C", "--directory", default=".", help="the project directory")
+    parser.add_argument("--lockfile", default=os.environ.get("CONDA_PURIFIER_LOCKFILE", ""),
+                        help="the lockfile, when it is kept outside the project "
+                        f"(default: $CONDA_PURIFIER_LOCKFILE, or {LOCKFILE} in the project)")
     sub = parser.add_subparsers(dest="command_name", required=True)
     lock = sub.add_parser("lock", help=f"write {LOCKFILE}")
     lock.add_argument("--file", "-f", action="append", default=[],
@@ -996,17 +1279,20 @@ def main(argv=None):
     lock.add_argument("--platform", "-p", action="append",
                       help=f"a conda platform to lock for (default: {', '.join(DEFAULT_PLATFORMS)})")
     lock.set_defaults(func=cmd_lock)
-    sub.add_parser("env", help="build the environment and print its path").set_defaults(func=cmd_env)
-    run_parser = sub.add_parser("run", help="run a command in the environment")
-    run_parser.add_argument("command", nargs=argparse.REMAINDER)
-    run_parser.set_defaults(func=cmd_run)
-    sub.add_parser("shell", help="start $SHELL in the environment").set_defaults(func=cmd_shell)
+    update = sub.add_parser(
+        "update", help=f"re-resolve the packages (all, or the named ones) and write {LOCKFILE}"
+    )
+    update.add_argument("packages", nargs="*", help="the packages to move (default: all)")
+    update.set_defaults(func=lambda a: cmd_lock(a, update=a.packages), file=[], platform=None)
+    sub.add_parser(
+        "prefetch", help="build the environment and keep it and every download with GC roots"
+    ).set_defaults(func=cmd_prefetch)
     publish = sub.add_parser("publish", help="upload the wheels Nix built of the project's packages")
-    publish.add_argument("--package", action="append", help="a package to publish (default: all)")
     publish.add_argument("publish_args", nargs=argparse.REMAINDER,
                          help="arguments for `uv publish`, after --")
     publish.set_defaults(func=cmd_publish)
     args = parser.parse_args(argv)
+    _lockfile = os.path.abspath(args.lockfile) if args.lockfile else ""
     if getattr(args, "publish_args", None) and args.publish_args[0] == "--":
         args.publish_args = args.publish_args[1:]
     try:

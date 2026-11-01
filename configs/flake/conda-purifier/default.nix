@@ -61,7 +61,8 @@
           {
             checks = import ../../../tests {
               inherit pkgs;
-              overlay = self.overlays.default;
+              inherit (self) lib;
+              cli = (pkgs.extend self.overlays.default).conda-purifier.conda-purifier;
             };
             treefmt.programs.nixfmt.enable = true;
           };

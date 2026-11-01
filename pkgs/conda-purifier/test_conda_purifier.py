@@ -55,11 +55,11 @@ class TestLockRun(unittest.TestCase):
     def test_lockfile_errors_say_what_to_run(self):
         with tempfile.TemporaryDirectory() as root:
             path = os.path.join(root, cp.LOCKFILE)
-            lock = {"version": 1, "platforms": {"linux-64": {"conda": []}}}
+            lock = {"version": cp.FORMAT, "platforms": {"linux-64": {"conda": []}}}
             lock["lockHash"] = cp.lock_hash(lock)
             with open(path, "w") as f:
                 json.dump(lock, f)
-            self.assertEqual(cp.read_lock(root)["version"], 1)
+            self.assertEqual(cp.read_lock(root)["version"], cp.FORMAT)
 
             lock["platforms"]["linux-64"]["conda"].append({"name": "added by hand"})
             with open(path, "w") as f:
@@ -71,6 +71,51 @@ class TestLockRun(unittest.TestCase):
                 f.write('{"version": 1,')
             with self.assertRaisesRegex(cp.Failure, "not valid JSON .*; run `conda-purifier lock`"):
                 cp.read_lock(root)
+
+            old = {"version": 1}
+            old["lockHash"] = cp.lock_hash(old)
+            with open(path, "w") as f:
+                json.dump(old, f)
+            with self.assertRaisesRegex(cp.Failure, "is format 1; .*Run `conda-purifier lock`"):
+                cp.read_lock(root)
+
+    def test_conda_lock_read_line_by_line(self):
+        text = (
+            "version: 1\n"
+            "metadata:\n"
+            "  platforms:\n"
+            "  - linux-64\n"
+            "package:\n"
+            "- name: python_abi\n"
+            "  version: '3.12'\n"
+            "  manager: conda\n"
+            "  platform: linux-64\n"
+            "  dependencies:\n"
+            "    sha256: not a hash\n"
+            "  url: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.12-9_cp312.conda\n"
+            "  hash:\n"
+            "    md5: 0123\n"
+            "    sha256: abcd\n"
+            "- name: six\n"
+            "  manager: pip\n"
+            "  platform: linux-64\n"
+            "  url: https://files.pythonhosted.org/six.whl\n"
+            "  hash:\n"
+            "    sha256: ef01\n"
+        )
+        packages = cp.conda_lock_packages(text)
+        self.assertEqual([p["name"] for p in packages], ["python_abi", "six"])
+        self.assertEqual(packages[0]["version"], "3.12")
+        self.assertEqual(packages[0]["hash"], {"md5": "0123", "sha256": "abcd"})
+        self.assertEqual(packages[1]["manager"], "pip")
+
+    def test_recorded_pip_fields(self):
+        git = {"name": "x", "version": "1", "path": "pip-git/x", "hash": "h",
+               "git": {"url": "u", "rev": "r", "submodules": True, "leaveDotGit": False}}
+        self.assertEqual(cp.recorded_entry(git),
+                         {"name": "x", "version": "1", "hash": "h", "git": {"url": "u", "rev": "r"}})
+        wheel = cp.pip_file_entry("https://example.org/x-1-py3-none-any.whl", "00" * 32, "x", "1")
+        self.assertEqual(sorted(cp.recorded_entry(wheel)), ["hash", "name", "url", "version"])
 
     def test_index_options(self):
         lines = ["six", "--extra-index-url https://example.org/simple", "-i=https://x/simple"]
