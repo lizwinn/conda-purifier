@@ -23,8 +23,29 @@ conda-purifier: wrote conda-purifier.lock.json
 
 The flake's `overlays.default` adds one attribute to a package set: the
 scope `conda-purifier`, which holds the builder `buildCondaProject` and the
-`conda-purifier` command. Your flake builds the environment from the
-lockfile with the builder:
+`conda-purifier` command. Build the environment from the project's
+directory, without adding a Nix file:
+
+```zsh
+nix build --impure --expr '
+  let
+    purifier = builtins.getFlake "github:nix-purifiers/conda-purifier";
+    pkgs = import purifier.inputs.nixpkgs {
+      system = builtins.currentSystem;
+      overlays = [ purifier.overlays.default ];
+    };
+  in
+  (pkgs.conda-purifier.buildCondaProject { src = ./.; }).packages.environment'
+```
+
+This uses the purifier's pinned nixpkgs, matching the lock command above.
+To build with ambient `<nixpkgs>` from your Nix search path instead,
+replace `import purifier.inputs.nixpkgs` with `import <nixpkgs>`.
+Both forms need no Nix files in your project. The build tool and language
+versions must match the lockfile; with ambient nixpkgs, lock with the
+purifier from that package set or pass a compatible toolchain to the builder.
+
+A flake is optional and can live in the project or in another repository:
 
 ```nix
 {
@@ -48,17 +69,11 @@ lockfile with the builder:
 }
 ```
 
-A package in an overlay takes the scope by name:
-
-```nix
-# package.nix
-{ conda-purifier }:
-(conda-purifier.buildCondaProject { src = ./.; }).packages.environment
-```
-
-`buildCondaProject.override` replaces the packages that the builder takes,
-such as `micromamba` or `fetchurl`, and `conda-purifier.overrideScope`
-replaces what everything in the scope shares.
+`pkgs.conda-purifier.buildCondaProject.override` replaces the packages that
+the builder takes, such as `micromamba` or `fetchurl`, and
+`pkgs.conda-purifier.overrideScope` replaces what everything in the scope
+shares. A package in an overlay takes the scope by name, as the argument
+`conda-purifier`.
 
 The builder takes `src`, the project directory, and these optional
 arguments. `lockFile` defaults to `conda-purifier.lock.json` in `src`, and
