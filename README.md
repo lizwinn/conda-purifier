@@ -1,101 +1,53 @@
 # conda-purifier
 
-conda-purifier builds conda environments with Nix, in the Nix sandbox and
-offline, without generated Nix files in your repository. It is one of the
-[nix-purifiers](https://nix-purifiers.github.io), which share a
-[contract](https://github.com/nix-purifiers/purifier/blob/main/CONTRACT.md)
-for their builders, commands, checks and READMEs.
+conda-purifier keeps Conda's development workflow on locked,
+Nix-resolved dependencies. Use the normal build and test commands in your
+working tree; building the project itself in the Nix sandbox is an
+optional next step.
+
+It follows the [purifier contract](https://github.com/nix-purifiers/purifier/blob/main/CONTRACT.md).
+
+## Installation
+
+Install the integration into your Nix profile once:
+
+```sh
+nix profile install 'github:nix-purifiers/conda-purifier'
+```
+
+This installs the purifier CLI. The workflow below prepares the native
+tool's cache, hook or environment; follow that activation step before using
+your usual commands. The ordinary tool itself remains your normal
+installation unless the setup explicitly supplies a toolchain.
+
+`nix shell` makes an integration available temporarily instead of installing
+it. Keep using the activation steps below where a project environment or
+prefetched cache is required.
 
 ## Quickstart
 
-`conda-purifier lock` solves your `environment.yml` and writes
-`conda-purifier.lock.json` beside it. We recommend committing it to your
-repository, together with your `conda-lock.yml` if the project has one. The
-builder and the commands look for both files in the project.
-
-```console
-$ nix run github:nix-purifiers/conda-purifier -- lock
-conda-purifier: solving environment.yml for linux-64
-conda-purifier: solving environment.yml for linux-aarch64
-...
-conda-purifier: wrote conda-purifier.lock.json
-```
-
-The flake's `overlays.default` adds one attribute to a package set: the
-scope `conda-purifier`, which holds the builder `buildCondaProject` and the
-`conda-purifier` command. Build the environment from the project's
-directory, without adding a Nix file:
+Install Nix, then run the following from your existing project's root.
+The setup prepares the locked dependencies and the integration that
+Conda's normal commands use:
 
 ```zsh
-nix build --impure --expr '
-  let
-    purifier = builtins.getFlake "github:nix-purifiers/conda-purifier";
-    pkgs = import purifier.inputs.nixpkgs {
-      system = builtins.currentSystem;
-      overlays = [ purifier.overlays.default ];
-    };
-  in
-  (pkgs.conda-purifier.buildCondaProject { src = ./.; }).packages.environment'
+nix run github:nix-purifiers/conda-purifier -- lock
+nix run github:nix-purifiers/conda-purifier -- prefetch
+conda activate ./.conda-purifier/env
+python -m pytest
 ```
 
-This uses the purifier's pinned nixpkgs, matching the lock command above.
-To build with ambient `<nixpkgs>` from your Nix search path instead,
-replace `import purifier.inputs.nixpkgs` with `import <nixpkgs>`.
-Both forms need no Nix files in your project. The build tool and language
-versions must match the lockfile; with ambient nixpkgs, lock with the
-purifier from that package set or pass a compatible toolchain to the builder.
+Commit the lockfiles that the lock command writes, including the build
+tool's own lockfile when it has one. Keep using the project's usual build,
+test and editor commands with this setup. Nix provides the locked
+dependencies; the development commands above run outside the Nix sandbox.
+No project Nix files are needed for this workflow.
 
-A flake is optional and can live in the project or in another repository:
+Use your existing Conda shell initialization for `conda activate`. The
+prepared environment is read-only; update dependencies through the lock.
 
-```nix
-{
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  inputs.conda-purifier.url = "github:nix-purifiers/conda-purifier";
-
-  outputs =
-    { nixpkgs, conda-purifier, ... }:
-    let
-      pkgs = import nixpkgs {
-        system = "x86_64-linux";
-        overlays = [ conda-purifier.overlays.default ];
-      };
-      project = pkgs.conda-purifier.buildCondaProject { src = ./.; };
-    in
-    {
-      packages.x86_64-linux = project.packages;
-      checks.x86_64-linux.tests = project.tests;
-      devShells.x86_64-linux.default = project.shell;
-    };
-}
-```
-
-`pkgs.conda-purifier.buildCondaProject.override` replaces the packages that
-the builder takes, such as `micromamba` or `fetchurl`, and
-`pkgs.conda-purifier.overrideScope` replaces what everything in the scope
-shares. A package in an overlay takes the scope by name, as the argument
-`conda-purifier`.
-
-The builder takes `src`, the project directory, and these optional
-arguments. `lockFile` defaults to `conda-purifier.lock.json` in `src`, and
-`condaLock` defaults to `conda-lock.yml` in `src`. `fetchers` replaces
-fetchers for the downloads, `name` defaults to the `name` in
-`environment.yml`, `runLinkScripts` runs the post-link scripts of conda
-packages, `testCommand` replaces the test command, and `environmentYml`
-supplies an environment file that is not in `src`. The builder returns
-these attributes:
-
-| Attribute | What it is |
-|---|---|
-| `packages.environment` | The environment, with the conda packages and the `pip:` section installed. |
-| `packages.<program>` | Each executable in the `bin/` directory of the environment, wrapped so that it runs with the variables of the environment. The lockfile lists the programs of each platform. |
-| `tests` | The project's test command, run in the sandbox with the environment active. The default is `python -m pytest` when the environment has pytest. The `testCommand` argument replaces it. |
-| `release` | A directory with the wheel of each of the project's own Python packages. `conda-purifier publish` uploads it. |
-| `fetches` | The entries of the purifier library that the build downloads, for SBOM, license and vulnerability tools. |
-| `shell` | A development shell with the environment active. |
-
-`lib.conda-purifier.readLock { src; lockFile; condaLock; }` reads the
-lockfiles into the shape every purifier shares: `{ purifier; entries; outputs; problems; }`.
-Each entry carries the Nix `systems` that need it.
+Sandboxed builds of the whole project are an optional
+[next step](#building-the-project-with-nix).
 
 ## Development loop
 
@@ -162,6 +114,90 @@ the builder. With a tool lockfile, `lock` and `update` write
 `conda-lock.yml` there and leave the copy in the project as it is. When the
 file at that path does not exist yet, they start from the copy in the
 project. The GC roots go in `.conda-purifier/` beside `conda-purifier.lock.json`.
+
+## Building the project with Nix
+
+Once the native development workflow is working, you can also build and
+test the whole project in the Nix sandbox. For this step, keep a flake or
+another Nix build definition in the project's repository, or maintain an
+external packaging repository that points at its sources and lockfiles.
+The builder consumes the same lockfiles as the development workflow.
+
+A flake is optional and can live in the project or in another repository:
+
+```nix
+{
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.conda-purifier.url = "github:nix-purifiers/conda-purifier";
+
+  outputs =
+    { nixpkgs, conda-purifier, ... }:
+    let
+      pkgs = import nixpkgs {
+        system = "x86_64-linux";
+        overlays = [ conda-purifier.overlays.default ];
+      };
+      project = pkgs.conda-purifier.buildCondaProject { src = ./.; };
+    in
+    {
+      packages.x86_64-linux = project.packages;
+      checks.x86_64-linux.tests = project.tests;
+      devShells.x86_64-linux.default = project.shell;
+    };
+}
+```
+
+`pkgs.conda-purifier.buildCondaProject.override` replaces the packages that
+the builder takes, such as `micromamba` or `fetchurl`, and
+`pkgs.conda-purifier.overrideScope` replaces what everything in the scope
+shares. A package in an overlay takes the scope by name, as the argument
+`conda-purifier`.
+
+The builder takes `src`, the project directory, and these optional
+arguments. `lockFile` defaults to `conda-purifier.lock.json` in `src`, and
+`condaLock` defaults to `conda-lock.yml` in `src`. `fetchers` replaces
+fetchers for the downloads, `name` defaults to the `name` in
+`environment.yml`, `runLinkScripts` runs the post-link scripts of conda
+packages, `testCommand` replaces the test command, and `environmentYml`
+supplies an environment file that is not in `src`. The builder returns
+these attributes:
+
+| Attribute | What it is |
+|---|---|
+| `packages.environment` | The environment, with the conda packages and the `pip:` section installed. |
+| `packages.<program>` | Each executable in the `bin/` directory of the environment, wrapped so that it runs with the variables of the environment. The lockfile lists the programs of each platform. |
+| `tests` | The project's test command, run in the sandbox with the environment active. The default is `python -m pytest` when the environment has pytest. The `testCommand` argument replaces it. |
+| `release` | A directory with the wheel of each of the project's own Python packages. `conda-purifier publish` uploads it. |
+| `fetches` | The entries of the purifier library that the build downloads, for SBOM, license and vulnerability tools. |
+| `shell` | A development shell with the environment active. |
+
+`lib.conda-purifier.readLock { src; lockFile; condaLock; }` reads the
+lockfiles into the shape every purifier shares: `{ purifier; entries; outputs; problems; }`.
+Each entry carries the Nix `systems` that need it.
+
+### One-off builds without a project Nix file
+
+For an ad hoc build, the builder can also be evaluated directly from the
+project root. Replace the example package name with one from your project:
+
+```zsh
+nix build --impure --expr '
+  let
+    purifier = builtins.getFlake "github:nix-purifiers/conda-purifier";
+    pkgs = import purifier.inputs.nixpkgs {
+      system = builtins.currentSystem;
+      overlays = [ purifier.overlays.default ];
+    };
+  in
+  (pkgs.conda-purifier.buildCondaProject { src = ./.; }).packages.environment'
+```
+
+This uses the purifier's pinned nixpkgs, matching the lock command above.
+To build with ambient `<nixpkgs>` from your Nix search path instead,
+replace `import purifier.inputs.nixpkgs` with `import <nixpkgs>`.
+Both forms need no Nix files in your project. The build tool and language
+versions must match the lockfile; with ambient nixpkgs, lock with the
+purifier from that package set or pass a compatible toolchain to the builder.
 
 ## Working offline
 
@@ -261,6 +297,11 @@ Limits that affect a project:
   pre-link scripts.
 
 ## Examples
+
+For day-to-day work on these projects, use the native-tool setup and
+commands in [Quickstart](#quickstart) and [Development loop](#development-loop).
+The Nix expressions below show optional sandboxed packaging of those
+projects.
 
 ### geopandas
 
