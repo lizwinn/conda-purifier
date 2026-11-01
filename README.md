@@ -100,6 +100,10 @@ The flake's `overlays.default` adds `buildCondaProject` to a package set:
 Its other arguments are `lockFile`, `name` (the default is the `name` in
 `environment.yml`), `runLinkScripts` and `fetchurl`.
 
+The lockfile's downloads are the entries of the shared
+[purifier](https://github.com/nix-purifiers/purifier) library, which fetches
+them and lays them out for the build.
+
 conda's binaries ask for the dynamic linker at `/lib64`, which NixOS and
 the Nix sandbox do not have. The build points every ELF file of the
 environment at the dynamic linker of the package set. The libraries stay

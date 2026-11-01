@@ -3,14 +3,21 @@
 # What `conda-purifier env`, `run`, `shell` and `publish` build for a
 # project: the same buildCondaProject a sandboxed build uses, from the
 # project directory as it is on disk. The command evaluates this file with
-# the nixpkgs it was built with and the project's absolute path, and keeps
-# the result alive with a GC root under .conda-purifier/.
+# the conda-purifier flake it was built from and the project's absolute
+# path, and keeps the result alive with a GC root under .conda-purifier/.
+# The flake's lock pins the nixpkgs and the shared purifier library the
+# build uses.
 {
-  nixpkgs,
+  # The source of the conda-purifier flake, a path in the store.
+  flake,
   projectDir,
 }:
 let
-  pkgs = import nixpkgs { };
+  conda-purifier = builtins.getFlake (toString flake);
+  pkgs = import conda-purifier.inputs.nixpkgs {
+    system = builtins.currentSystem;
+    overlays = [ conda-purifier.overlays.default ];
+  };
   inherit (pkgs) lib;
   # The project without what is not its source: its version control, the
   # links conda-purifier and nix-build leave in it.
@@ -25,4 +32,4 @@ let
       !(base == ".git" || base == ".conda-purifier" || lib.hasPrefix "result" base);
   };
 in
-pkgs.callPackage ./build-conda-project.nix { } { inherit src; }
+pkgs.buildCondaProject { inherit src; }

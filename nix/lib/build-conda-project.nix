@@ -18,9 +18,12 @@
 # through their $ORIGIN run paths.
 {
   lib,
+  pkgs,
+  # The shared library of the nix-purifiers (github:nix-purifiers/purifier),
+  # which fetches the download entries and lays them out as a tree.
+  purifier,
   stdenv,
   stdenvNoCC,
-  callPackage,
   writeText,
   micromamba,
   patchelf,
@@ -58,11 +61,15 @@ let
     else
       "conda-env";
 
+  # Every locked download, at its path: the conda packages under pkgs/, the
+  # pip: section's files under pip/ and its checkouts beside them. The
+  # project's own directories are not downloads.
   isDownload = e: !(e ? local);
-  dependencies = callPackage ./dependencies.nix (
+  dependencies = purifier.tree (
     {
-      downloads = locked.conda ++ builtins.filter isDownload (locked.pip ++ locked.pipBuild);
+      inherit pkgs;
       name = "${envName}-dependencies";
+      entries = locked.conda ++ builtins.filter isDownload (locked.pip ++ locked.pipBuild);
     }
     // lib.optionalAttrs (fetchurl != null) { inherit fetchurl; }
   );

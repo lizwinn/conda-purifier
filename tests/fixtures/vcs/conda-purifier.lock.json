@@ -3,7 +3,7 @@
     "environment.yml"
   ],
   "inputsHash": "b31a407b29ca61f790a7d78e951044218055b0bbeec2a0ebf9ccf2659645133e",
-  "lockHash": "9396cfa5cbb80c75e2e780d4403935ee7bf6e278156f8f4a3350839b935489ab",
+  "lockHash": "b2f5bc16f6fbd1a72b7637831f59a5bffd1728f2986f02c1f0b06ad0d260f18f",
   "outputs": {
     "name": "vcs-requirements",
     "packages": {}
@@ -225,6 +225,7 @@
           "hash": "sha256-sSSMcFf/yYz5iHGnHnA1dupMmf8KNy+hPvRgciGaDgk=",
           "hg": {
             "rev": "813",
+            "subrepos": false,
             "url": "https://hg.sr.ht/~olly/yoyo"
           },
           "name": "yoyo-migrations",
@@ -236,6 +237,8 @@
           "name": "docutils",
           "path": "pip-svn/docutils",
           "svn": {
+            "ignoreExternals": false,
+            "ignoreKeywords": false,
             "rev": "10000",
             "url": "https://svn.code.sf.net/p/docutils/code/trunk/docutils"
           },
@@ -576,6 +579,7 @@
           "hash": "sha256-sSSMcFf/yYz5iHGnHnA1dupMmf8KNy+hPvRgciGaDgk=",
           "hg": {
             "rev": "813",
+            "subrepos": false,
             "url": "https://hg.sr.ht/~olly/yoyo"
           },
           "name": "yoyo-migrations",
@@ -587,6 +591,8 @@
           "name": "docutils",
           "path": "pip-svn/docutils",
           "svn": {
+            "ignoreExternals": false,
+            "ignoreKeywords": false,
             "rev": "10000",
             "url": "https://svn.code.sf.net/p/docutils/code/trunk/docutils"
           },

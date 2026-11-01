@@ -49,7 +49,8 @@ PREFETCH = {
     "bzr": os.environ.get("CONDA_PURIFIER_PREFETCH_BZR", "nix-prefetch-bzr"),
 }
 NIX_LIB = os.environ.get("CONDA_PURIFIER_NIX_LIB", "")
-NIXPKGS = os.environ.get("CONDA_PURIFIER_NIXPKGS", "")
+# The source of the conda-purifier flake this command was built from.
+FLAKE = os.environ.get("CONDA_PURIFIER_FLAKE", "")
 
 # The CPU names of conda subdirs, as they appear in wheel platform tags.
 WHEEL_ARCH = {
@@ -647,9 +648,15 @@ def lock_pip(root, env_dir, requirements, host_python, host, platforms, work):
             rev = info["vcs_info"]["commit_id"]
             digest, path = prefetch_vcs(vcs, url, rev)
             source = {"url": url, "rev": rev}
+            # The fields of the shared library's entries, as the hashes above
+            # were computed.
             if vcs == "git":
                 # pip checks out a git requirement's submodules.
                 source.update(submodules=True, leaveDotGit=False, commitObject=None)
+            elif vcs == "hg":
+                source.update(subrepos=False)
+            elif vcs == "svn":
+                source.update(ignoreExternals=False, ignoreKeywords=False)
             shared.append({"name": name, "version": version, "path": f"pip-{vcs}/{name}",
                            "hash": digest, vcs: source})
             pending_builds.append(read_text(os.path.join(path, "pyproject.toml")))
@@ -915,7 +922,7 @@ def nix_build(root, attribute, link_name):
     os.makedirs(os.path.dirname(link), exist_ok=True)
     result = subprocess.run(
         ["nix-build", os.path.join(NIX_LIB, "interactive.nix"), "--attr", attribute,
-         "--arg", "nixpkgs", NIXPKGS, "--argstr", "projectDir", root, "--out-link", link],
+         "--argstr", "flake", FLAKE, "--argstr", "projectDir", root, "--out-link", link],
         text=True, capture_output=True,
     )
     if result.returncode != 0:

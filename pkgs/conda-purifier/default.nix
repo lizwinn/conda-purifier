@@ -17,7 +17,6 @@
   nix-prefetch-svn,
   uv,
   glibc,
-  path,
   git,
   mercurial,
   subversion,
@@ -69,7 +68,7 @@ stdenvNoCC.mkDerivation {
       --set CONDA_PURIFIER_DYNAMIC_LINKER ${lib.optionalString stdenv.hostPlatform.isLinux stdenv.cc.bintools.dynamicLinker} \
       --set CONDA_PURIFIER_GLIBC ${lib.optionalString stdenv.hostPlatform.isLinux glibc.version} \
       --set CONDA_PURIFIER_NIX_LIB "$out/share/conda-purifier/nix-lib" \
-      --set CONDA_PURIFIER_NIXPKGS ${path}
+      --set CONDA_PURIFIER_FLAKE ${../..}
     runHook postInstall
   '';
   meta = {

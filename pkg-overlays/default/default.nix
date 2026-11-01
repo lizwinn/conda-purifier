@@ -16,6 +16,8 @@ in
     final: prev:
     packages final prev
     // {
-      buildCondaProject = final.callPackage ../../nix/lib/build-conda-project.nix { };
+      buildCondaProject = final.callPackage ../../nix/lib/build-conda-project.nix {
+        inherit (closure-lib) purifier;
+      };
     };
 }
