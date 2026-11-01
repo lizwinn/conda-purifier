@@ -1,8 +1,18 @@
 # SPDX-License-Identifier: MIT
 #
-# `lib.conda-purifier.buildCondaProject`: builds a conda project from its
-# conda-purifier.lock.json in the Nix sandbox, offline. The result has
-# the attributes of the purifier contract:
+# `buildCondaProject`: builds a conda project from its
+# conda-purifier.lock.json in the Nix sandbox, offline.
+#
+# The file is a package for callPackage: the first argument set is what it
+# takes from the package set, and the result is the builder. The
+# conda-purifier overlay (`overlays.default`) adds it to the package set as
+# `buildCondaProject`, so a package written for callPackage takes it like
+# any other dependency:
+#
+#   { buildCondaProject }: (buildCondaProject { src = ./.; }).packages.environment
+#
+# and `buildCondaProject.override` replaces what it takes from the set. The
+# result has the attributes of the purifier contract:
 #
 #   packages.environment  the environment: conda's packages, created by
 #                         micromamba from the locked files, with the pip:
@@ -22,12 +32,26 @@
 # at the linker of the package set; the libraries stay conda's own, found
 # through their $ORIGIN run paths.
 {
-  # The composed library, with the shared purifier library under
-  # lib.purifier.
+  # The library of this flake's closure, with the shared purifier library
+  # under lib.purifier and readLock under lib.conda-purifier.
   lib,
+  stdenv,
+  stdenvNoCC,
+  writeText,
+  micromamba,
+  patchelf,
+  makeWrapper,
+  runCommand,
+  mkShell,
+  # The fetchers of nixpkgs for the downloads of the lock; `fetchers`
+  # replaces any of them.
+  fetchurl,
+  fetchgit,
+  fetchhg,
+  fetchsvn,
+  fetchbzr,
 }:
 {
-  pkgs,
   # The project directory, holding conda-purifier.lock.json and the files
   # it was made from.
   src,
@@ -54,17 +78,6 @@
   testCommand ? null,
 }:
 let
-  inherit (pkgs)
-    stdenv
-    stdenvNoCC
-    writeText
-    micromamba
-    patchelf
-    makeWrapper
-    runCommand
-    mkShell
-    ;
-
   # An environment file or conda-lock.yml given outside `src` takes the
   # place of the lock's first input, the file it was made from. Reading
   # that name here leaves every check of the lockfile to readLock and
@@ -101,9 +114,20 @@ let
   # This system's downloads, at their paths: the conda packages under pkgs/,
   # the pip: section's files under pip/ and its checkouts beside them.
   dependencies = lib.purifier.tree (
-    fetchers
+    {
+      # The only member of a package set that `tree` takes besides the
+      # fetchers.
+      pkgs = { inherit runCommand; };
+      inherit
+        fetchurl
+        fetchgit
+        fetchhg
+        fetchsvn
+        fetchbzr
+        ;
+    }
+    // fetchers
     // {
-      inherit pkgs;
       name = "${envName}-dependencies";
       entries = lib.purifier.entriesFor system lock;
     }

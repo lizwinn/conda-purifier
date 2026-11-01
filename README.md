@@ -19,8 +19,9 @@ conda-purifier: solving environment.yml for linux-aarch64
 conda-purifier: wrote conda-purifier.lock.json
 ```
 
-Your flake builds the environment from that lockfile with
-`lib.conda-purifier.buildCondaProject`:
+The flake's `overlays.default` adds the builder `buildCondaProject` to a
+package set, where nixpkgs keeps its own builders. Your flake builds the
+environment from the lockfile with it:
 
 ```nix
 {
@@ -30,11 +31,11 @@ Your flake builds the environment from that lockfile with
   outputs =
     { nixpkgs, conda-purifier, ... }:
     let
-      pkgs = nixpkgs.legacyPackages.x86_64-linux;
-      project = conda-purifier.lib.conda-purifier.buildCondaProject {
-        inherit pkgs;
-        src = ./.;
+      pkgs = import nixpkgs {
+        system = "x86_64-linux";
+        overlays = [ conda-purifier.overlays.default ];
       };
+      project = pkgs.buildCondaProject { src = ./.; };
     in
     {
       packages.x86_64-linux = project.packages;
@@ -44,12 +45,21 @@ Your flake builds the environment from that lockfile with
 }
 ```
 
-The flake's `lib` has the shared
-[purifier](https://github.com/nix-purifiers/purifier) library under
-`lib.purifier`, which the builder uses. If your flake composes its own
-library, add `conda-purifier.lib` to it.
+A package in an overlay takes the builder by name, like any other builder:
 
-`buildCondaProject` returns these attributes:
+```nix
+# package.nix
+{ buildCondaProject }: (buildCondaProject { src = ./.; }).packages.environment
+```
+
+`buildCondaProject.override` replaces the packages that the builder takes
+from the package set, such as `micromamba` or `fetchurl`.
+
+The builder takes `src`, the project directory, and these optional
+arguments: `lockFile`, `fetchers`, `name` (the default is the `name` in
+`environment.yml`), `runLinkScripts`, `testCommand`, and `environmentYml`
+and `condaLockYml` for sources that are not in `src`. It returns these
+attributes:
 
 | Attribute | What it is |
 |---|---|
@@ -60,15 +70,11 @@ library, add `conda-purifier.lib` to it.
 | `fetches` | The entries of the purifier library that the build downloads, for SBOM, license and vulnerability tools. |
 | `shell` | A development shell with the environment active. |
 
-Its other arguments are `lockFile`, `name` (the default is the `name` in
-`environment.yml`), `runLinkScripts`, `testCommand`, `environmentYml` and
-`condaLockYml` (for sources that are not in `src`), and `fetchers`.
-
 `lib.conda-purifier.readLock { src; lockFile; }` reads the lockfiles into
 the shape every purifier shares: `{ purifier; entries; outputs; problems; }`.
 Each entry carries the Nix `systems` that need it.
 
-## Everyday loop
+## Development loop
 
 Work in the environment that `conda-purifier prefetch` builds:
 
@@ -98,8 +104,8 @@ $ conda-purifier update numpy pandas
 ```
 
 With a `conda-lock.yml`, `update` runs the update of conda-lock on it first
-and then relocks. Explicit spec files have no resolver, so `update` refuses
-them.
+and then relocks. Explicit spec files pin every package, so you write them
+again with `conda list --explicit` and run `conda-purifier lock`.
 
 `conda-purifier publish` builds `release` with Nix and uploads the wheels
 with `uv publish`. Arguments after `--` go to `uv publish`:
@@ -119,12 +125,12 @@ Pass `lockFile` to `buildCondaProject`; it replaces any lockfile in
 `CONDA_PURIFIER_LOCKFILE`, which a development shell can set to the same
 path. The GC roots then go in `.conda-purifier/` beside the lockfile.
 
-## Offline work
+## Working offline
 
 `conda-purifier prefetch` builds the environment and every locked download
 for the current system, and keeps them alive with GC roots:
 `.conda-purifier/env` and `.conda-purifier/downloads`. After a prefetch,
-the everyday loop works with the network cut off, including a rebuild
+the development loop works with the network cut off, including a rebuild
 after a change to the project's own packages, since the downloads are
 already in the Nix store.
 
@@ -144,7 +150,7 @@ Interpreter". For pyright, pass
 `--pythonpath .conda-purifier/env/bin/python`. Run
 `conda-purifier prefetch` first, so that the interpreter exists.
 
-## Errors and fixes
+## Troubleshooting
 
 Each of these stops with a message that names the command to run, in the
 commands and at Nix evaluation:
@@ -160,7 +166,7 @@ commands and at Nix evaluation:
 | A kept version conflicts with a change | `The environment file conflicts with the versions the lock keeps; run conda-purifier update with the packages to move` |
 | `pip install` inside the environment | `This environment is built by conda-purifier ... Add the package to the environment file ..., then run conda-purifier lock` |
 
-## Sources supported and refused
+## Supported language repositories
 
 conda-purifier reads one of three inputs, found in this order:
 
@@ -204,17 +210,17 @@ your `.condarc` and `CONDA_*` settings, so two machines produce the same
 lock from the same inputs. It installs the `pip:` section offline from the
 recorded files before it writes the lockfile.
 
-conda-purifier refuses these:
+Limits that affect a project:
 
-- A `conda-lock.yml` of another format than 1, or one that is not laid out
-  as conda-lock writes it. Nix reads that file line by line, and the lock
-  run compares the result with what a YAML parser reads.
-- A build requirement of the `pip:` section with no wheel for a platform.
-  The error names the requirement.
-- macOS for the `pip:` section. conda-purifier resolves the `pip:` section
-  for Linux platforms only, and it supports building on Linux only.
-- The pre-link scripts of conda packages. The build runs post-link scripts
-  only.
+- A `conda-lock.yml` has to be in format 1 and laid out as conda-lock
+  writes it. Nix reads that file line by line, and the lock run compares
+  the result with what a YAML parser reads.
+- Every build requirement of the `pip:` section needs a wheel for each
+  platform. The error names a requirement that has none.
+- The `pip:` section resolves for Linux platforms, and conda-purifier
+  builds on Linux.
+- The build runs the post-link scripts of conda packages and not their
+  pre-link scripts.
 
 ## Examples
 
@@ -248,11 +254,18 @@ To build the same environment in a flake of your own, next to
   };
 
   outputs =
-    { nixpkgs, conda-purifier, geopandas, ... }:
+    {
+      nixpkgs,
+      conda-purifier,
+      geopandas,
+      ...
+    }:
     let
-      pkgs = nixpkgs.legacyPackages.x86_64-linux;
-      project = conda-purifier.lib.conda-purifier.buildCondaProject {
-        inherit pkgs;
+      pkgs = import nixpkgs {
+        system = "x86_64-linux";
+        overlays = [ conda-purifier.overlays.default ];
+      };
+      project = pkgs.buildCondaProject {
         src = geopandas;
         lockFile = ./conda-purifier.lock.json;
       };

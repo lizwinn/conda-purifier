@@ -16,7 +16,10 @@
 }:
 let
   conda-purifier = builtins.getFlake (toString flake);
-  pkgs = import conda-purifier.inputs.nixpkgs { system = builtins.currentSystem; };
+  pkgs = import conda-purifier.inputs.nixpkgs {
+    system = builtins.currentSystem;
+    overlays = [ conda-purifier.overlays.default ];
+  };
   inherit (conda-purifier) lib;
   # The project without what is not its source: its version control, the
   # links conda-purifier and nix-build leave in it.
@@ -31,6 +34,6 @@ let
       !(base == ".git" || base == ".conda-purifier" || lib.hasPrefix "result" base);
   };
 in
-lib.conda-purifier.buildCondaProject (
-  { inherit pkgs src; } // lib.optionalAttrs (lockFile != "") { lockFile = /. + lockFile; }
+pkgs.buildCondaProject (
+  { inherit src; } // lib.optionalAttrs (lockFile != "") { lockFile = /. + lockFile; }
 )

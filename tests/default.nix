@@ -7,15 +7,18 @@
 # jobs of the same names.
 {
   pkgs,
-  # The flake's library, with lib.conda-purifier.buildCondaProject.
+  # The flake's default package overlay, which adds buildCondaProject.
+  overlay,
+  # The flake's library, with lib.conda-purifier.readLock.
   lib,
   # The conda-purifier command.
   cli,
 }:
 let
   # Every fixture builds the way a consumer's package does: through the
-  # builder of the flake's library.
-  build = args: lib.conda-purifier.buildCondaProject ({ inherit pkgs; } // args);
+  # builder that the overlay adds to the package set.
+  withOverlay = pkgs.extend overlay;
+  build = withOverlay.buildCondaProject;
 
   # An environment.yml with python and numpy from conda-forge, and a pip:
   # section with a pure wheel, a wheel per platform, an sdist, a git
@@ -204,15 +207,34 @@ in
       # A platform the lock does not cover is refused.
       &&
         fails
-          (build {
-            src = ./fixtures/app;
-            pkgs = pkgs // {
-              stdenv = pkgs.stdenv // {
+          (
+            (build.override {
+              stdenv = withOverlay.stdenv // {
                 hostPlatform = lib.systems.elaborate "powerpc64le-linux";
               };
-            };
-          }).packages.environment.drvPath
+            })
+              { src = ./fixtures/app; }
+          ).packages.environment.drvPath
     ) "the lock reader did not select each platform's packages and programs";
+
+  # A package written for callPackage takes the builder by name, and
+  # override replaces what the builder takes from the package set.
+  builder-package =
+    let
+      consumer =
+        { buildCondaProject }: (buildCondaProject { src = ./fixtures/explicit; }).packages.environment;
+      replaced = build.override {
+        fetchurl = args: throw "replaced fetchurl was called for ${args.name or args.url}";
+      };
+    in
+    evalCheck "builder-package" (
+      (withOverlay.callPackage consumer { }).drvPath == (build { src = ./fixtures/explicit; })
+      .packages.environment.drvPath
+      && build ? override
+      && !((builtins.tryEval (replaced { src = ./fixtures/explicit; }).packages.environment.drvPath)
+        .success
+      )
+    ) "the builder is not a package that callPackage and override handle";
 
   # Every fixture's lock has the shape of the purifier contract. A noarch
   # package is one entry for both systems, and a package for one platform
