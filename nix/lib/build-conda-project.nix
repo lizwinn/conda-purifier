@@ -102,16 +102,18 @@ let
     ) locked.conda
   );
 
-  # What pip installs: each package's file or checkout, or the project's own
-  # directory. pip builds a directory in place, so the build copies them.
+  # What pip installs, one tab-separated line each: a downloaded file, or a
+  # directory to build (a checkout, or one of the project's own directories)
+  # with the version the lock run recorded for it. pip builds a directory in
+  # place, so the build copies it.
   pipTargets = lib.concatMapStrings (
     e:
     if e ? local then
-      "copy ${lib.escapeShellArg "${src}/${e.local}"}\n"
+      "build\t${e.version}\t${src}/${e.local}\n"
     else if e ? url then
-      "file ${dependencies}/${e.path}\n"
+      "file\t${e.version}\t${dependencies}/${e.path}\n"
     else
-      "copy ${dependencies}/${e.path}\n"
+      "build\t${e.version}\t${dependencies}/${e.path}\n"
   ) locked.pip;
 
   # The build has no version control metadata. A package built from a
@@ -179,20 +181,29 @@ let
         ''}
 
         if [ -s "$pipTargetsPath" ]; then
-          targets=()
+          pipInstall() {
+            PIP_CONFIG_FILE=/dev/null "$out/bin/python" -m pip install --disable-pip-version-check \
+              --no-index --no-deps --no-cache-dir --no-compile --no-warn-script-location \
+              --find-links ${dependencies}/pip "$@"
+          }
+          files=()
           n=0
-          while read -r kind path; do
-            if [ "$kind" = copy ]; then
+          while IFS=$'\t' read -r kind version path; do
+            if [ "$kind" = build ]; then
+              # Each directory builds on its own, so that setuptools-scm,
+              # hatch-vcs and the other version-control plugins get its
+              # version without the .git the build lacks.
               n=$((n + 1))
               cp -rL --no-preserve=mode "$path" "$TMPDIR/pip-$n"
-              targets+=("$TMPDIR/pip-$n")
+              SETUPTOOLS_SCM_PRETEND_VERSION="$version" VCS_VERSIONING_PRETEND_VERSION="$version" \
+                pipInstall "$TMPDIR/pip-$n"
             else
-              targets+=("$path")
+              files+=("$path")
             fi
           done < "$pipTargetsPath"
-          PIP_CONFIG_FILE=/dev/null "$out/bin/python" -m pip install --disable-pip-version-check \
-            --no-index --no-deps --no-cache-dir --no-compile --no-warn-script-location \
-            --find-links ${dependencies}/pip "''${targets[@]}"
+          if [ "''${#files[@]}" -gt 0 ]; then
+            pipInstall "''${files[@]}"
+          fi
         fi
 
         if [ -x "$out/bin/python" ]; then
@@ -261,10 +272,17 @@ let
 
   package =
     pname: dir:
+    let
+      version = (lib.findFirst (e: e.name == pname) { version = "0"; } locked.pip).version;
+    in
     stdenvNoCC.mkDerivation (
       scmVersions
       // {
         name = "${pname}-wheel";
+        # The version the lock run recorded, for version-control plugins
+        # that build without a .git.
+        SETUPTOOLS_SCM_PRETEND_VERSION = version;
+        VCS_VERSIONING_PRETEND_VERSION = version;
         dontUnpack = true;
         buildPhase = ''
           runHook preBuild

@@ -166,7 +166,11 @@ These mistakes stop with a message that says what to run:
   scipy, matplotlib, and the GDAL, GEOS and PROJ stack). The lock run takes
   about 45 seconds. CI builds the environment on x86_64-linux and
   aarch64-linux and runs geopandas' tests of its geometry methods and
-  coordinate reference systems in it, offline. With the environment, pyright
+  coordinate reference systems in it, offline. Adding `pip` and `-e .` to
+  `environment-dev.yml` installs geopandas from the checkout: the relock
+  takes about a minute, and the build gives hatch-vcs the version the lock
+  run saw, since the build has no `.git`. Raising the `ruff` pin and
+  relocking gives the new ruff. With the environment, pyright
   leaves one import of geopandas unresolved, `sqlalchemy.text`, which names
   a function rather than a module; without it, pyright leaves 30.
 
