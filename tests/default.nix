@@ -321,19 +321,25 @@ in
       (explicitInputs // { "conda-purifier.lock.json" = ./fixtures/malformed/conda-purifier.lock.json; })
       "is not valid JSON";
 
-  # A project whose source holds no lockfile builds from one kept outside
-  # it.
+  # A project whose source holds only the spec files builds from a lockfile
+  # kept outside it. The source is a copy of the explicit fixture without
+  # its lockfile, and the check fails when the two copies differ.
   conformance-external =
     let
       external = build {
-        src = lib.cleanSourceWith {
-          src = ./fixtures/explicit;
-          filter = path: type: baseNameOf path != "conda-purifier.lock.json";
-        };
+        src = ./fixtures/external;
         lockFile = ./fixtures/explicit/conda-purifier.lock.json;
         name = "bzip2-env";
       };
+      sameSpec =
+        file:
+        builtins.readFile (./fixtures/external + "/${file}")
+        == builtins.readFile (./fixtures/explicit + "/${file}");
     in
+    assert lib.assertMsg (lib.all sameSpec [
+      "linux-64.txt"
+      "linux-aarch64.txt"
+    ]) "conda-purifier check conformance-external: fixtures/external differs from fixtures/explicit";
     pkgs.runCommand "conformance-external" { nativeBuildInputs = [ external.packages.bzip2 ]; } ''
       echo hello | bzip2 | bzip2 -d | grep -qx hello
       touch $out
