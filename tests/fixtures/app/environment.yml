@@ -1,0 +1,21 @@
+name: hello-conda
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - numpy=2
+  - pip
+  - pip:
+      # A pure-Python wheel.
+      - six==1.17.0
+      # A package with a wheel per platform.
+      - msgpack==1.1.0
+      # A package that has only an sdist, built with setuptools.
+      - docopt==0.6.2
+      # A git requirement, pinned to a commit.
+      - git+https://github.com/pypa/sampleproject@621e4974ca25ce531773def586ba3ed8e736b3fc
+      # The project's own package, built with flit-core.
+      - ./hello
+variables:
+  HELLO_CONDA_GREETING: hello from conda

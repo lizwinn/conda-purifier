@@ -1,0 +1,12 @@
+name: vcs-requirements
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      # A Mercurial requirement.
+      - hg+https://hg.sr.ht/~olly/yoyo@6d255163e92b#egg=yoyo-migrations
+      # A Subversion requirement.
+      - svn+https://svn.code.sf.net/p/docutils/code/trunk/docutils@10000#egg=docutils
