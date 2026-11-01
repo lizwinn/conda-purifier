@@ -103,9 +103,14 @@ environment again, or only the packages you name:
 $ conda-purifier update numpy pandas
 ```
 
-With a `conda-lock.yml`, `update` runs the update of conda-lock on it first
-and then relocks. Explicit spec files pin every package, so you write them
-again with `conda list --explicit` and run `conda-purifier lock`.
+conda has no lockfile of its own for an `environment.yml`, so
+`conda-purifier.lock.json` holds the solve, and `lock` and `update` are the
+two ways to change it. A `conda-lock.yml` is the lockfile that conda-lock
+writes: `lock` keeps the resolution that file records, and `update` runs
+the update of conda-lock on it first and then relocks. Explicit spec files
+pin every package and conda has no resolver for them, so `update` does not
+apply to them: write them again with `conda list --explicit` and run
+`conda-purifier lock`.
 
 `conda-purifier publish` builds `release` with Nix and uploads the wheels
 with `uv publish`. Arguments after `--` go to `uv publish`:
