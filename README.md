@@ -16,7 +16,7 @@ $ nix run github:nix-purifiers/conda-purifier -- lock
 conda-purifier: solving environment.yml for linux-64
 conda-purifier: solving environment.yml for linux-aarch64
 ...
-conda-purifier: wrote conda-purifier.lock.json (linux-64: 35 conda, 6 pip, linux-aarch64: 35 conda, 6 pip)
+conda-purifier: wrote conda-purifier.lock.json
 ```
 
 Your flake builds the environment from that lockfile with
@@ -128,9 +128,6 @@ the everyday loop works with the network cut off, including a rebuild
 after a change to the project's own packages, since the downloads are
 already in the Nix store.
 
-The check `conformance-offline` runs the loop of a fixture in the sandbox,
-which has no network.
-
 ### Private channels
 
 A private channel puts its access token in the URL (`/t/<token>/`). The
@@ -214,29 +211,61 @@ conda-purifier refuses these:
   run compares the result with what a YAML parser reads.
 - A build requirement of the `pip:` section with no wheel for a platform.
   The error names the requirement.
-- macOS for the `pip:` section. conda-purifier locks `osx-64` and
-  `osx-arm64` conda packages, but it resolves the `pip:` section for Linux
-  platforms only, and the macOS build is untested.
+- macOS for the `pip:` section. conda-purifier resolves the `pip:` section
+  for Linux platforms only, and it supports building on Linux only.
 - The pre-link scripts of conda packages. The build runs post-link scripts
   only.
 
 ## Examples
 
-CI locks and builds these projects as examples of the purifier at work.
+### geopandas
 
-- [geopandas](https://github.com/geopandas/geopandas) at `ead9a4fe`, its
-  `environment-dev.yml`: 309 conda packages on linux-64 (pandas, pyarrow,
-  scipy, matplotlib, and the GDAL, GEOS and PROJ stack). The lock run takes
-  about a minute. The lockfile sits outside the geopandas source, in
-  `tests/real/geopandas/`, which is the external form of the contract.
-  CI builds the environment on x86_64-linux and aarch64-linux and runs the
-  geopandas tests of its geometry methods and coordinate reference systems
-  in it, offline. Adding `pip` and `-e .` to `environment-dev.yml` installs
-  geopandas from the checkout, and the build gives hatch-vcs the version
-  that the lock run saw. Raising the `ruff` pin and relocking gives the new
-  ruff. With the environment, pyright leaves one import of geopandas
-  unresolved, `sqlalchemy.text`, which names a function rather than a
-  module; without it, pyright leaves 30.
+[geopandas](https://github.com/geopandas/geopandas) keeps its development
+environment in `environment-dev.yml`: pandas, pyarrow, scipy, matplotlib and
+the GDAL, GEOS and PROJ libraries. To work on it with a conda environment
+from Nix, clone it and lock that file. The lockfile lives in your own
+directory, outside the clone:
+
+```console
+$ git clone https://github.com/geopandas/geopandas
+$ export CONDA_PURIFIER_LOCKFILE=$PWD/conda-purifier.lock.json
+$ conda-purifier -C geopandas lock --file environment-dev.yml
+$ conda-purifier -C geopandas prefetch
+$ conda activate ./.conda-purifier/env
+$ cd geopandas && python -m pytest geopandas/tests/test_crs.py
+```
+
+To build the same environment in a flake of your own, next to
+`conda-purifier.lock.json`, take geopandas as a non-flake input:
+
+```nix
+{
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.conda-purifier.url = "github:nix-purifiers/conda-purifier";
+  inputs.geopandas = {
+    url = "github:geopandas/geopandas";
+    flake = false;
+  };
+
+  outputs =
+    { nixpkgs, conda-purifier, geopandas, ... }:
+    let
+      pkgs = nixpkgs.legacyPackages.x86_64-linux;
+      project = conda-purifier.lib.conda-purifier.buildCondaProject {
+        inherit pkgs;
+        src = geopandas;
+        lockFile = ./conda-purifier.lock.json;
+      };
+    in
+    {
+      packages.x86_64-linux.default = project.packages.environment;
+      devShells.x86_64-linux.default = project.shell;
+    };
+}
+```
+
+To install geopandas itself into the environment, add `pip` and a `pip:`
+section with `-e .` to `environment-dev.yml`, then lock again.
 
 ## Credits
 
