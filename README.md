@@ -156,7 +156,7 @@ commands and at Nix evaluation:
 |---|---|
 | The environment file changed after the lock | `environment.yml changed after conda-purifier.lock.json was written; run conda-purifier lock again` |
 | The lockfile was edited by hand | `conda-purifier.lock.json was changed after conda-purifier wrote it; run conda-purifier lock to write it again` |
-| The lockfile is not valid JSON | `conda-purifier.lock.json is not a lockfile conda-purifier wrote; run conda-purifier lock to write it again` |
+| The lockfile is not valid JSON | `conda-purifier.lock.json is not valid JSON; run conda-purifier lock to write it again` |
 | The lockfile lacks the hash of a file | `conda-purifier.lock.json has no SHA-256 for <url>; run conda-purifier lock to write it again` |
 | The lockfile has an older format | `conda-purifier.lock.json is format 1; this conda-purifier reads format 2. Run conda-purifier lock to write it again` |
 | A platform is missing from the lock | `conda-purifier.lock.json has no packages for linux-aarch64; run conda-purifier lock --platform linux-aarch64 together with the other platforms` |
@@ -220,7 +220,9 @@ conda-purifier refuses these:
 - The pre-link scripts of conda packages. The build runs post-link scripts
   only.
 
-## Real-world projects
+## Examples
+
+CI locks and builds these projects as examples of the purifier at work.
 
 - [geopandas](https://github.com/geopandas/geopandas) at `ead9a4fe`, its
   `environment-dev.yml`: 309 conda packages on linux-64 (pandas, pyarrow,

@@ -125,6 +125,10 @@ in
         ls ${environment}/conda-meta/numpy-2.*.json
         ${environment}/bin/python -c 'import importlib.metadata as m; i = m.distribution("numpy").read_text("INSTALLER").strip(); assert i == "conda", i'
         sample
+        # Nothing from a nixpkgs Python reaches the environment: the build
+        # inputs set no PYTHONPATH, and every directory on sys.path is the
+        # environment's own.
+        ${environment}/bin/python -c 'import os, sys; assert "PYTHONPATH" not in os.environ; bad = [p for p in sys.path if p and not p.startswith("${environment}")]; assert not bad, bad'
         grep -q HELLO_CONDA_GREETING ${environment}/conda-meta/state
         # pip says what to do instead of installing into the environment.
         if ${environment}/bin/python -m pip install --no-index six > pip.log 2>&1; then
@@ -310,16 +314,11 @@ in
       )
       "has no SHA-256 for https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda";
 
-  conformance-malformed =
-    refusal "conformance-malformed"
-      (fails
-        (build {
-          src = ./fixtures/explicit;
-          lockFile = ./fixtures/malformed/conda-purifier.lock.json;
-        }).packages.environment.drvPath
-      )
-      (explicitInputs // { "conda-purifier.lock.json" = ./fixtures/malformed/conda-purifier.lock.json; })
-      "is not valid JSON";
+  # Nix cannot catch the parse error of a lockfile that is not valid JSON,
+  # so only the command's refusal is checked here.
+  conformance-malformed = refusal "conformance-malformed" true (
+    explicitInputs // { "conda-purifier.lock.json" = ./fixtures/malformed/conda-purifier.lock.json; }
+  ) "is not valid JSON";
 
   # A project whose source holds only the spec files builds from a lockfile
   # kept outside it. The source is a copy of the explicit fixture without

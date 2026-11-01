@@ -47,12 +47,12 @@ let
   lockName = baseNameOf (toString lockFile);
   rerun = "run `conda-purifier lock` to write it again";
 
-  # A JSON parse error cannot be caught or reworded, so a lockfile that does
-  # not even begin and end as conda-purifier writes it is a problem before
-  # it is parsed.
-  text = builtins.readFile lockFile;
-  wellFormed = lib.hasPrefix "{" text && lib.hasSuffix "}\n" text;
-  lock = if wellFormed then builtins.fromJSON text else { };
+  # Nix cannot catch a JSON parse error, so a lockfile that is not valid
+  # JSON fails evaluation, with the command that writes it again in the
+  # error context.
+  lock = builtins.addErrorContext "conda-purifier: ${lockName} is not valid JSON; ${rerun}." (
+    builtins.fromJSON (builtins.readFile lockFile)
+  );
 
   readInput = name: builtins.readFile (inputFiles.${name} or (src + "/${name}"));
 
@@ -62,9 +62,7 @@ let
   );
 
   lockProblems =
-    if !wellFormed then
-      [ "conda-purifier: ${lockName} is not a lockfile conda-purifier wrote; ${rerun}." ]
-    else if
+    if
       (lock.lockHash or null)
       != builtins.hashString "sha256" (builtins.toJSON (removeAttrs lock [ "lockHash" ]))
     then
