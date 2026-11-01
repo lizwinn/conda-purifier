@@ -107,88 +107,112 @@ let
       "copy ${dependencies}/${e.path}\n"
   ) locked.pip;
 
-  env = stdenvNoCC.mkDerivation {
-    name = envName;
-    dontUnpack = true;
-    nativeBuildInputs = [
-      micromamba
-      patchelf
-    ];
-    passAsFile = [
-      "pipTargets"
-      "stateJson"
-    ];
-    inherit pipTargets;
-    stateJson = builtins.toJSON { env_vars = locked.variables; };
-    dynamicLinker = stdenv.cc.bintools.dynamicLinker;
-    buildPhase = ''
-      runHook preBuild
-      export HOME=$TMPDIR/home MAMBA_ROOT_PREFIX=$TMPDIR/root CONDA_PKGS_DIRS=$TMPDIR/pkgs
-      mkdir -p "$HOME" "$CONDA_PKGS_DIRS"
-      for f in ${dependencies}/pkgs/*; do
-        cp "$f" "$CONDA_PKGS_DIRS/$(basename "$f")"
-      done
+  # The build has no version control metadata. A package built from a
+  # directory or a checkout whose version setuptools-scm computes gets the
+  # version the lock run recorded, where pip saw the repository.
+  scmNormalize =
+    name:
+    lib.toUpper (
+      lib.concatStringsSep "_" (
+        builtins.filter (s: builtins.isString s && s != "") (builtins.split "[-_.]+" name)
+      )
+    );
+  scmVersions = lib.listToAttrs (
+    map (e: lib.nameValuePair "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_${scmNormalize e.name}" e.version) (
+      builtins.filter (e: !(e ? url)) locked.pip
+    )
+  );
 
-      micromamba create --yes --no-rc --offline --no-pyc --copy \
-        --skip-run-link-scripts --prefix "$out" --file ${explicit}
+  env = stdenvNoCC.mkDerivation (
+    scmVersions
+    // {
+      name = envName;
+      dontUnpack = true;
+      nativeBuildInputs = [
+        micromamba
+        patchelf
+      ];
+      passAsFile = [
+        "pipTargets"
+        "stateJson"
+      ];
+      inherit pipTargets;
+      stateJson = builtins.toJSON { env_vars = locked.variables; };
+      dynamicLinker = stdenv.cc.bintools.dynamicLinker;
+      buildPhase = ''
+        runHook preBuild
+        export HOME=$TMPDIR/home MAMBA_ROOT_PREFIX=$TMPDIR/root CONDA_PKGS_DIRS=$TMPDIR/pkgs
+        mkdir -p "$HOME" "$CONDA_PKGS_DIRS"
+        for f in ${dependencies}/pkgs/*; do
+          cp "$f" "$CONDA_PKGS_DIRS/$(basename "$f")"
+        done
 
-      ${lib.optionalString stdenv.hostPlatform.isLinux ''
-        while IFS= read -r -d "" f; do
-          if [ ! -L "$f" ] && head -c 4 "$f" | grep -q $'\x7fELF' \
-              && patchelf --print-interpreter "$f" >/dev/null 2>&1; then
-            chmod u+w "$f"
-            patchelf --set-interpreter "$dynamicLinker" "$f"
-          fi
-        done < <(find "$out" -type f -print0)
-      ''}
+        micromamba create --yes --no-rc --offline --no-pyc --copy \
+          --skip-run-link-scripts --prefix "$out" --file ${explicit}
 
-      ${lib.optionalString runLinkScripts ''
-        while IFS=$'\t' read -r pkg version build; do
-          script="$out/bin/.$pkg-post-link.sh"
-          if [ -f "$script" ]; then
-            echo "running the post-link script of $pkg"
-            PREFIX="$out" PKG_NAME="$pkg" PKG_VERSION="$version" PKG_BUILDNUM="$build" \
-              PATH="$out/bin:$PATH" bash "$script"
-          fi
-        done < ${linkScripts}
-      ''}
+        ${lib.optionalString stdenv.hostPlatform.isLinux ''
+          while IFS= read -r -d "" f; do
+            if [ ! -L "$f" ] && head -c 4 "$f" | grep -q $'\x7fELF' \
+                && patchelf --print-interpreter "$f" >/dev/null 2>&1; then
+              chmod u+w "$f"
+              patchelf --set-interpreter "$dynamicLinker" "$f"
+            fi
+          done < <(find "$out" -type f -print0)
+        ''}
 
-      if [ -s "$pipTargetsPath" ]; then
-        targets=()
-        n=0
-        while read -r kind path; do
-          if [ "$kind" = copy ]; then
-            n=$((n + 1))
-            cp -rL --no-preserve=mode "$path" "$TMPDIR/pip-$n"
-            targets+=("$TMPDIR/pip-$n")
-          else
-            targets+=("$path")
-          fi
-        done < "$pipTargetsPath"
-        PIP_CONFIG_FILE=/dev/null "$out/bin/python" -m pip install --disable-pip-version-check \
-          --no-index --no-deps --no-cache-dir --no-compile --no-warn-script-location \
-          --find-links ${dependencies}/pip "''${targets[@]}"
-      fi
+        ${lib.optionalString runLinkScripts ''
+          while IFS=$'\t' read -r pkg version build; do
+            script="$out/bin/.$pkg-post-link.sh"
+            if [ -f "$script" ]; then
+              echo "running the post-link script of $pkg"
+              PREFIX="$out" PKG_NAME="$pkg" PKG_VERSION="$version" PKG_BUILDNUM="$build" \
+                PATH="$out/bin:$PATH" bash "$script"
+            fi
+          done < ${linkScripts}
+        ''}
 
-      if [ -x "$out/bin/python" ]; then
-        stdlib=$("$out/bin/python" -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')
-        "$out/bin/python" -m compileall -q -j0 --invalidation-mode unchecked-hash \
-          "$stdlib" >/dev/null || true
-      fi
+        if [ -s "$pipTargetsPath" ]; then
+          targets=()
+          n=0
+          while read -r kind path; do
+            if [ "$kind" = copy ]; then
+              n=$((n + 1))
+              cp -rL --no-preserve=mode "$path" "$TMPDIR/pip-$n"
+              targets+=("$TMPDIR/pip-$n")
+            else
+              targets+=("$path")
+            fi
+          done < "$pipTargetsPath"
+          PIP_CONFIG_FILE=/dev/null "$out/bin/python" -m pip install --disable-pip-version-check \
+            --no-index --no-deps --no-cache-dir --no-compile --no-warn-script-location \
+            --find-links ${dependencies}/pip "''${targets[@]}"
+        fi
 
-      # conda reads the environment's variables from here when it activates
-      # the environment.
-      cp "$stateJsonPath" "$out/conda-meta/state"
-      # The history records when the environment was made.
-      echo "==> conda-purifier <==" > "$out/conda-meta/history"
-      runHook postBuild
-    '';
-    dontInstall = true;
-    dontFixup = true;
-    passthru = {
-      inherit dependencies locked;
-    };
-  };
+        if [ -x "$out/bin/python" ]; then
+          stdlib=$("$out/bin/python" -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')
+          "$out/bin/python" -m compileall -q -j0 --invalidation-mode unchecked-hash \
+            "$stdlib" >/dev/null || true
+          # pip refuses to install into the environment and says why (PEP 668).
+          cat > "$stdlib/EXTERNALLY-MANAGED" <<'EOF'
+        [externally-managed]
+        Error=This environment is built by conda-purifier from conda-purifier.lock.json and is read-only. Add the package to the environment file, to its dependencies or to its pip: section, then run `conda-purifier lock`.
+        EOF
+        fi
+
+        # conda reads the environment's variables from here when it activates
+        # the environment.
+        cp "$stateJsonPath" "$out/conda-meta/state"
+        # The history records when the environment was made.
+        echo "==> conda-purifier <==" > "$out/conda-meta/history"
+        runHook postBuild
+      '';
+      dontInstall = true;
+      dontFixup = true;
+      passthru = {
+        inherit dependencies locked;
+      };
+    }
+  );
 
   setVariables = lib.concatStringsSep " " (
     lib.mapAttrsToList (k: v: "--set ${lib.escapeShellArg k} ${lib.escapeShellArg v}") locked.variables
@@ -230,22 +254,25 @@ let
 
   package =
     pname: dir:
-    stdenvNoCC.mkDerivation {
-      name = "${pname}-wheel";
-      dontUnpack = true;
-      buildPhase = ''
-        runHook preBuild
-        export HOME=$TMPDIR/home
-        cp -rL --no-preserve=mode ${lib.escapeShellArg "${src}/${dir}"} "$TMPDIR/source"
-        mkdir -p "$out"
-        PIP_CONFIG_FILE=/dev/null ${env}/bin/python -m pip wheel --disable-pip-version-check \
-          --no-index --no-deps --no-cache-dir --find-links ${dependencies}/pip \
-          --wheel-dir "$out" "$TMPDIR/source"
-        runHook postBuild
-      '';
-      dontInstall = true;
-      dontFixup = true;
-    };
+    stdenvNoCC.mkDerivation (
+      scmVersions
+      // {
+        name = "${pname}-wheel";
+        dontUnpack = true;
+        buildPhase = ''
+          runHook preBuild
+          export HOME=$TMPDIR/home
+          cp -rL --no-preserve=mode ${lib.escapeShellArg "${src}/${dir}"} "$TMPDIR/source"
+          mkdir -p "$out"
+          PIP_CONFIG_FILE=/dev/null ${env}/bin/python -m pip wheel --disable-pip-version-check \
+            --no-index --no-deps --no-cache-dir --find-links ${dependencies}/pip \
+            --wheel-dir "$out" "$TMPDIR/source"
+          runHook postBuild
+        '';
+        dontInstall = true;
+        dontFixup = true;
+      }
+    );
 in
 {
   inherit env;

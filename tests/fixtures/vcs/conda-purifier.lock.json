@@ -3,6 +3,7 @@
     "environment.yml"
   ],
   "inputsHash": "b31a407b29ca61f790a7d78e951044218055b0bbeec2a0ebf9ccf2659645133e",
+  "lockHash": "9396cfa5cbb80c75e2e780d4403935ee7bf6e278156f8f4a3350839b935489ab",
   "outputs": {
     "name": "vcs-requirements",
     "packages": {}

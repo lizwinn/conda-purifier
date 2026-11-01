@@ -3,6 +3,7 @@
     "environment.yml"
   ],
   "inputsHash": "84f41e117e6b4152e98b7285d6ed79d14b76cd74df978aa6ea23a4cee2ab3fa2",
+  "lockHash": "69abedcffba794e2f9393e31ee514a1f35ae21456fb97f40ea2db4545e77fc31",
   "outputs": {
     "name": "hello-conda",
     "packages": {

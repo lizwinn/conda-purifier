@@ -3,6 +3,7 @@
 
 import base64
 import hashlib
+import json
 import os
 import tempfile
 import unittest
@@ -50,6 +51,26 @@ class TestLockRun(unittest.TestCase):
                 f.write(b"name: x\r\n")
             expected = hashlib.sha256(b"environment.yml\nname: x\r\n\n").hexdigest()
             self.assertEqual(cp.inputs_hash(root, ["environment.yml"]), expected)
+
+    def test_lockfile_errors_say_what_to_run(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, cp.LOCKFILE)
+            lock = {"version": 1, "platforms": {"linux-64": {"conda": []}}}
+            lock["lockHash"] = cp.lock_hash(lock)
+            with open(path, "w") as f:
+                json.dump(lock, f)
+            self.assertEqual(cp.read_lock(root)["version"], 1)
+
+            lock["platforms"]["linux-64"]["conda"].append({"name": "added by hand"})
+            with open(path, "w") as f:
+                json.dump(lock, f)
+            with self.assertRaisesRegex(cp.Failure, "changed after conda-purifier wrote it; run `conda-purifier lock`"):
+                cp.read_lock(root)
+
+            with open(path, "w") as f:
+                f.write('{"version": 1,')
+            with self.assertRaisesRegex(cp.Failure, "not valid JSON .*; run `conda-purifier lock`"):
+                cp.read_lock(root)
 
     def test_index_options(self):
         lines = ["six", "--extra-index-url https://example.org/simple", "-i=https://x/simple"]

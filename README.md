@@ -57,7 +57,9 @@ recorded files before it writes the lockfile.
 
 Commit `conda-purifier.lock.json`. When `environment.yml`, a requirement
 file it includes, `conda-lock.yml` or the explicit spec files change, the
-build refuses the lock until `conda-purifier lock` runs again.
+build refuses the lock until `conda-purifier lock` runs again. A later
+`conda-purifier lock` without `--file` locks the same files for the same
+platforms again, so a lock made from `environment-dev.yml` stays one.
 
 ## Building with Nix
 
@@ -129,6 +131,40 @@ hello from conda: n+1=42 inverse-sum=1.5 six=1.17.0 numpy=2
 
 The environment is read-only. Your own packages are installed as they were
 at the last build, and the next `run` builds in any change to them.
+
+### Day to day
+
+To add or upgrade a package, change `environment.yml`, run
+`conda-purifier lock`, then use the environment as before. The build of a
+package from a directory or a checkout gets the version pip saw in the lock
+run, so a package whose version setuptools-scm computes from git builds
+without the git metadata.
+
+An editor or language server finds the packages when you point it at
+`.conda-purifier/env/bin/python`, the way you would point it at a conda
+environment: VS Code's "Python: Select Interpreter", or
+`pyright --pythonpath .conda-purifier/env/bin/python`.
+
+These mistakes stop with a message that says what to run:
+
+| What happened | What conda-purifier says |
+|---|---|
+| The environment file changed after the lock | `environment.yml changed after conda-purifier.lock.json was written; run conda-purifier lock again` |
+| The lockfile was edited by hand | `conda-purifier.lock.json was changed after conda-purifier wrote it; run conda-purifier lock to write it again` |
+| The lockfile is not valid JSON | `conda-purifier.lock.json is not valid JSON (...); run conda-purifier lock to write it again` |
+| A platform is missing from the lock | `conda-purifier.lock.json has no packages for linux-aarch64; run conda-purifier lock --platform linux-aarch64 together with the other platforms` |
+| `pip install` inside the environment | `This environment is built by conda-purifier ... Add the package to the environment file ..., then run conda-purifier lock` |
+
+## Tested on
+
+- [geopandas](https://github.com/geopandas/geopandas) at `ead9a4fe`, its
+  `environment-dev.yml`: 309 conda packages on linux-64 (pandas, pyarrow,
+  scipy, matplotlib, and the GDAL, GEOS and PROJ stack). The lock run takes
+  about 45 seconds. CI builds the environment on x86_64-linux and
+  aarch64-linux and runs geopandas' tests of its geometry methods and
+  coordinate reference systems in it, offline. With the environment, pyright
+  leaves one import of geopandas unresolved, `sqlalchemy.text`, which names
+  a function rather than a module; without it, pyright leaves 30.
 
 ## Publishing
 

@@ -156,8 +156,47 @@ def inputs_hash(root, inputs):
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def lock_hash(lock):
+    """The hash of a lockfile without its lockHash; nix/lib/lock.nix computes the same.
+
+    The JSON is the form builtins.toJSON writes: sorted keys, no spaces and
+    characters as they are.
+    """
+    body = {k: v for k, v in lock.items() if k != "lockHash"}
+    text = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def read_lock(root):
+    """Reads a project's lockfile, refusing a malformed or edited one."""
+    path = os.path.join(root, LOCKFILE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            lock = json.load(f)
+    except json.JSONDecodeError as e:
+        die(f"{path} is not valid JSON ({e}); run `conda-purifier lock` to write it again.")
+    if lock.get("lockHash") != lock_hash(lock):
+        die(f"{path} was changed after conda-purifier wrote it; run `conda-purifier lock` to write it again.")
+    return lock
+
+
 def find_source(root, files):
-    """Returns (kind, [files]) for what the lock is made from."""
+    """Returns (kind, [files]) for what the lock is made from.
+
+    Without --file, a project that has a lockfile is locked again from the
+    files it was made from, so `conda-purifier lock` keeps working on an
+    environment-dev.yml or on explicit spec files.
+    """
+    if not files and os.path.exists(os.path.join(root, LOCKFILE)):
+        try:
+            with open(os.path.join(root, LOCKFILE), encoding="utf-8") as f:
+                previous = json.load(f)
+            if previous.get("source") == "environment":
+                files = previous["inputs"][:1]
+            elif previous.get("source") in ("conda-lock", "explicit"):
+                files = previous["inputs"]
+        except (json.JSONDecodeError, KeyError, OSError):
+            files = []
     if files:
         kinds = {source_kind(os.path.join(root, f)) for f in files}
         if len(kinds) > 1:
@@ -172,6 +211,21 @@ def find_source(root, files):
         if os.path.exists(os.path.join(root, name)):
             return "environment", [name]
     die(f"{root} has no {CONDA_LOCK_FILE} or environment.yml; pass --file.")
+
+
+def previous_platforms(root):
+    """The platforms an existing lockfile covers, which a relock keeps."""
+    try:
+        with open(os.path.join(root, LOCKFILE), encoding="utf-8") as f:
+            return sorted(json.load(f).get("platforms", {}))
+    except (json.JSONDecodeError, OSError, AttributeError):
+        return []
+
+
+def check_fresh(root, lock):
+    """Refuses a lock whose inputs changed, naming them as the project does."""
+    if inputs_hash(root, lock["inputs"]) != lock.get("inputsHash"):
+        die(f"{', '.join(lock['inputs'])} changed after {LOCKFILE} was written; run `conda-purifier lock` again.")
 
 
 def source_kind(path):
@@ -762,7 +816,7 @@ def cmd_lock(args):
     global _download_dir
     root = os.path.abspath(args.directory)
     kind, inputs = find_source(root, args.file)
-    platforms = list(args.platform or DEFAULT_PLATFORMS)
+    platforms = list(args.platform or previous_platforms(root) or DEFAULT_PLATFORMS)
     host = host_subdir()
     variables = {}
     pip_requirements = []
@@ -835,6 +889,7 @@ def cmd_lock(args):
         "outputs": outputs,
         "platforms": found,
     }
+    lock["lockHash"] = lock_hash(lock)
     with open(os.path.join(root, LOCKFILE), "w") as f:
         json.dump(lock, f, indent=2, sort_keys=True)
         f.write("\n")
@@ -869,12 +924,13 @@ def nix_build(root, attribute, link_name):
 
 
 def build_env(root):
+    # The lockfile's own errors read better here than from Nix.
+    check_fresh(root, read_lock(root))
     return nix_build(root, "env", "env")
 
 
 def activated(root, prefix):
-    with open(os.path.join(root, LOCKFILE)) as f:
-        variables = json.load(f).get("variables", {})
+    variables = read_lock(root).get("variables", {})
     env = dict(os.environ)
     env.update(variables)
     env["CONDA_PREFIX"] = prefix
@@ -909,8 +965,7 @@ def cmd_publish(args):
     current build backends such as hatchling write.
     """
     root = project_root(args.directory)
-    with open(os.path.join(root, LOCKFILE)) as f:
-        packages = json.load(f).get("outputs", {}).get("packages", {})
+    packages = read_lock(root).get("outputs", {}).get("packages", {})
     names = args.package or sorted(packages)
     if not names:
         die(f"{LOCKFILE} names no packages of the project; the pip: section has no local directories.")

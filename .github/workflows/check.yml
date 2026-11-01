@@ -25,3 +25,11 @@ jobs:
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
       - run: nix flake check -L --all-systems --no-build
       - run: nix flake check -L
+      # A relock reproduces the lockfile byte for byte. These fixtures pin
+      # every package; an environment.yml is solved again against the
+      # channels as they are on the day.
+      - name: relock the pinned fixtures
+        run: |
+          nix run .#conda-purifier -- -C tests/fixtures/explicit lock
+          nix run .#conda-purifier -- -C tests/fixtures/conda-lock lock
+          git diff --exit-code tests/fixtures
