@@ -12,7 +12,6 @@
     # take nixpkgs.
     nixpkgs-lib.url = "github:nix-community/nixpkgs.lib";
     flake-parts.url = "github:hercules-ci/flake-parts";
-    flake-parts.inputs.nixpkgs-lib.follows = "nixpkgs-lib";
   };
 
   outputs =
