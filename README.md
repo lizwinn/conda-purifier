@@ -362,8 +362,10 @@ section with `-e .` to `environment-dev.yml`, then lock again.
 
 ## Credits
 
-The purifier idea was inspired by the
-[cargo (libnix)](https://github.com/nixcloud/cargo) project of nixcloud.
+The purifier idea was inspired by nixcloud's
+[cargo (libnix)](https://github.com/nixcloud/cargo).
+
 conda-purifier uses [micromamba](https://github.com/mamba-org/mamba) to
 solve and install, and [uv](https://github.com/astral-sh/uv) to publish.
-It is MIT licensed.
+
+Released under the MIT license; see [LICENSE](LICENSE).
