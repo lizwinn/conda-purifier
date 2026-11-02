@@ -179,15 +179,15 @@ For an ad hoc build, the builder can also be evaluated directly from the
 project root. Replace the example package name with one from your project:
 
 ```zsh
-nix build --impure --expr '
-  let
-    purifier = builtins.getFlake "github:nix-purifiers/conda-purifier";
-    pkgs = import purifier.inputs.nixpkgs {
-      system = builtins.currentSystem;
-      overlays = [ purifier.overlays.default ];
-    };
-  in
-  (pkgs.conda-purifier.buildCondaProject { src = ./.; }).packages.environment'
+nix build --impure --expr 'let
+  purifier = builtins.getFlake "github:nix-purifiers/conda-purifier";
+  pkgs = import purifier.inputs.nixpkgs {
+    system = builtins.currentSystem;
+    overlays = [ purifier.overlays.default ];
+  };
+in
+(pkgs.conda-purifier.buildCondaProject { src = ./.; })
+.packages.environment'
 ```
 
 This uses the purifier's pinned nixpkgs, matching the lock command above.
