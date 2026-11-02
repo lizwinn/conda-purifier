@@ -110,8 +110,10 @@ A flake is optional and can live in the project or in another repository:
 
 ```nix
 {
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  inputs.conda-purifier.url = "github:nix-purifiers/conda-purifier";
+  inputs.nixpkgs.url =
+    "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.conda-purifier.url =
+    "github:nix-purifiers/conda-purifier";
 
   outputs =
     { nixpkgs, conda-purifier, ... }:
@@ -120,7 +122,9 @@ A flake is optional and can live in the project or in another repository:
         system = "x86_64-linux";
         overlays = [ conda-purifier.overlays.default ];
       };
-      project = pkgs.conda-purifier.buildCondaProject { src = ./.; };
+      project = pkgs.conda-purifier.buildCondaProject {
+        src = ./.;
+      };
     in
     {
       packages.x86_64-linux = project.packages;
@@ -309,8 +313,10 @@ To build the same environment in a flake of your own, next to
 
 ```nix
 {
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  inputs.conda-purifier.url = "github:nix-purifiers/conda-purifier";
+  inputs.nixpkgs.url =
+    "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.conda-purifier.url =
+    "github:nix-purifiers/conda-purifier";
   inputs.geopandas = {
     url = "github:geopandas/geopandas";
     flake = false;
@@ -334,7 +340,8 @@ To build the same environment in a flake of your own, next to
       };
     in
     {
-      packages.x86_64-linux.default = project.packages.environment;
+      packages.x86_64-linux.default =
+        project.packages.environment;
       devShells.x86_64-linux.default = project.shell;
     };
 }
